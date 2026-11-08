@@ -20,6 +20,21 @@ SOURCE = "the_odds_api"
 
 
 @dataclass(frozen=True)
+class OddsCapture:
+    """One run of the odds command, whether or not it found any lines."""
+
+    source: str
+    sport_key: str
+    captured_at: str
+    regions: str
+    events: int
+    rows: int
+
+    def as_tuple(self) -> tuple:
+        return (self.source, self.sport_key, self.captured_at, self.regions, self.events, self.rows)
+
+
+@dataclass(frozen=True)
 class OddsRow:
     source: str
     event_id: str

@@ -87,3 +87,17 @@ def test_main_reports_credit_floor_as_failure(tmp_path, monkeypatch):
     assert main(["--db", str(tmp_path / "k.db")]) == 1
     with MarketStore(tmp_path / "k.db") as store:
         assert store.latest_odds_capture("americanfootball_nfl") == (None, [])
+
+
+def test_run_records_an_empty_capture(tmp_path, caplog):
+    class Empty(FakeOddsClient):
+        def get_odds(self, sport_key, *, regions, markets="h2h"):
+            self.credits = Credits(remaining=478, used=22, last_cost=2)
+            return []
+
+    with MarketStore(tmp_path / "k.db") as store:
+        stats = run(sport_key="americanfootball_nfl", regions="us", client=Empty(), store=store, now="2026-11-08T17:31:02Z")
+        captured_at, rows = store.latest_odds_capture("americanfootball_nfl")
+    assert (stats.events, stats.rows) == (0, 0)
+    assert captured_at == "2026-11-08T17:31:02Z" and rows == []
+    assert "recorded an empty capture" in caplog.text

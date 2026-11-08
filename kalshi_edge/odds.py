@@ -33,7 +33,7 @@ from kalshi_edge.sportsbook.client import (
     OddsApiClient,
     OddsApiError,
 )
-from kalshi_edge.sportsbook.parse import parse_odds_payload
+from kalshi_edge.sportsbook.parse import SOURCE, OddsCapture, parse_odds_payload
 from kalshi_edge.store import MarketStore
 
 logger = logging.getLogger(__name__)
@@ -63,13 +63,26 @@ def run(
     client.check_credits()
     events = client.get_odds(sport_key, regions=regions, markets="h2h")
     rows = parse_odds_payload(events, captured_at=now)
-    store.save_odds(rows)
+    capture = OddsCapture(
+        source=SOURCE,
+        sport_key=sport_key,
+        captured_at=now,
+        regions=regions,
+        events=len({row.event_id for row in rows}),
+        rows=len(rows),
+    )
+    # Saved even when empty: a successful run with no lines (off-season, a
+    # sport key with nothing listed) must replace the previous capture, not
+    # leave compare quietly pricing against it.
+    store.save_odds(capture, rows)
+    if not rows:
+        logger.warning("%s: provider returned no %s lines; recorded an empty capture", sport_key, "h2h")
     return CaptureStats(
         sport_key=sport_key,
         regions=regions,
         captured_at=now,
-        events=len({row.event_id for row in rows}),
-        rows=len(rows),
+        events=capture.events,
+        rows=capture.rows,
         bookmakers=tuple(sorted({row.bookmaker for row in rows})),
         credits=client.credits,
     )

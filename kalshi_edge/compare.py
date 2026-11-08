@@ -117,6 +117,7 @@ class Report:
     budget: Decimal | None
     kalshi_captured_at: str | None
     odds_captured_at: str | None
+    odds_rows: int
     gap_minutes: float | None
     max_gap_minutes: float
     fee_source: str
@@ -161,8 +162,14 @@ def load_kalshi(store: MarketStore, series_ticker: str) -> tuple[str | None, dic
 
 def load_odds(
     store: MarketStore, sport_key: str
-) -> tuple[str | None, list[SportsbookEvent], dict[str, dict[str, dict[str, Decimal]]], dict[str, dict[str, str | None]]]:
-    """Newest capture as events, ``prices[event_id][bookmaker][outcome]`` and book update times."""
+) -> tuple[
+    str | None,
+    list[SportsbookEvent],
+    dict[str, dict[str, dict[str, Decimal]]],
+    dict[str, dict[str, str | None]],
+    int,
+]:
+    """Newest capture as events, ``prices[event_id][bookmaker][outcome]``, book update times, row count."""
     captured_at, rows = store.latest_odds_capture(sport_key)
     events: dict[str, SportsbookEvent] = {}
     prices: dict[str, dict[str, dict[str, Decimal]]] = {}
@@ -186,7 +193,7 @@ def load_odds(
         )
         prices.setdefault(event_id, {}).setdefault(row["bookmaker"], {})[row["outcome"]] = price
         updated.setdefault(event_id, {})[row["bookmaker"]] = row["book_updated"]
-    return captured_at, list(events.values()), prices, updated
+    return captured_at, list(events.values()), prices, updated, len(rows)
 
 
 def fair_probabilities(
@@ -320,7 +327,7 @@ def run(
     if (contracts is None) == (budget is None):
         raise ValueError("pass exactly one of contracts or budget")
     kalshi_at, kalshi_events = load_kalshi(store, series_ticker)
-    odds_at, sportsbook_events, prices, updated = load_odds(store, table.sport_key)
+    odds_at, sportsbook_events, prices, updated, odds_rows = load_odds(store, table.sport_key)
     fee = store.series_fee(series_ticker)
     if fee is None or fee.fee_type is None:
         fee_source = "published default (quadratic, multiplier 1); series_fees row missing, run collect"
@@ -344,6 +351,7 @@ def run(
         budget=budget,
         kalshi_captured_at=kalshi_at,
         odds_captured_at=odds_at,
+        odds_rows=odds_rows,
         gap_minutes=gap,
         max_gap_minutes=max_gap_minutes,
         fee_source=fee_source,
@@ -421,6 +429,8 @@ def format_report(report: Report) -> str:
         lines.append("no open-market snapshot for this series; run collect --mode snapshot first")
     if report.odds_captured_at is None:
         lines.append("no sportsbook capture for this sport; run kalshi_edge.odds first")
+    elif report.odds_rows == 0:
+        lines.append("the newest sportsbook capture has no moneylines; nothing to compare against")
     for event in report.events:
         lines.append("")
         lines.append(

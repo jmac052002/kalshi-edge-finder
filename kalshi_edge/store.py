@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Self
 
 from kalshi_edge.parse import ParsedMarket, PreEventPrice, PriceSnapshot, SeriesFee
-from kalshi_edge.sportsbook.parse import OddsRow
+from kalshi_edge.sportsbook.parse import OddsCapture, OddsRow
 
 SCHEMA_VERSION = 3
 
@@ -128,6 +128,20 @@ CREATE TABLE IF NOT EXISTS pre_event_prices (
     fetched_at TEXT NOT NULL,
     history_missing INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (ticker) REFERENCES markets (ticker)
+);
+
+-- One row per odds run, written even when the provider returned no
+-- moneylines. The newest row here, not the newest outcome row, defines the
+-- "latest capture": an empty capture must supersede older odds, otherwise
+-- compare would keep pricing contracts against lines that are gone.
+CREATE TABLE IF NOT EXISTS odds_captures (
+    source TEXT NOT NULL,
+    sport_key TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    regions TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    PRIMARY KEY (source, sport_key, captured_at)
 );
 
 -- One row per bookmaker outcome per capture. Prices stay exactly as the
@@ -298,6 +312,15 @@ ON CONFLICT(source, event_id, bookmaker, market, outcome, captured_at) DO UPDATE
     book_updated = excluded.book_updated
 """
 
+_UPSERT_CAPTURE = """
+INSERT INTO odds_captures (source, sport_key, captured_at, regions, events, rows)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(source, sport_key, captured_at) DO UPDATE SET
+    regions = excluded.regions,
+    events = excluded.events,
+    rows = excluded.rows
+"""
+
 _UPSERT_MATCH = """
 INSERT INTO line_matches (event_ticker, source, event_id, method, kickoff_delta_s, matched_at)
 VALUES (?, ?, ?, ?, ?, ?)
@@ -457,15 +480,26 @@ class MarketStore:
             fetched_at=row["fetched_at"],
         )
 
-    def save_odds(self, rows: list[OddsRow]) -> None:
-        """One capture is one transaction, so a crash mid-write leaves nothing partial."""
+    def save_odds(self, capture: OddsCapture, rows: list[OddsRow]) -> None:
+        """Record one capture and its rows in one transaction.
+
+        The capture row is written even when ``rows`` is empty, so a run
+        that found no moneylines still becomes the latest capture. A crash
+        mid-write leaves neither half behind.
+        """
         with self.conn:
-            self.conn.executemany(_UPSERT_ODDS, [row.as_tuple() for row in rows])
+            self.conn.execute(_UPSERT_CAPTURE, capture.as_tuple())
+            if rows:
+                self.conn.executemany(_UPSERT_ODDS, [row.as_tuple() for row in rows])
 
     def latest_odds_capture(self, sport_key: str) -> tuple[str | None, list[sqlite3.Row]]:
-        """The newest capture for one sport: its timestamp and every row in it."""
+        """The newest capture for one sport: its timestamp and every row in it.
+
+        "Newest" comes from ``odds_captures``, so an empty capture returns
+        its timestamp with no rows rather than falling back to older odds.
+        """
         latest = self.conn.execute(
-            "SELECT MAX(captured_at) FROM sportsbook_odds WHERE sport_key = ?", (sport_key,)
+            "SELECT MAX(captured_at) FROM odds_captures WHERE sport_key = ?", (sport_key,)
         ).fetchone()[0]
         if latest is None:
             return None, []

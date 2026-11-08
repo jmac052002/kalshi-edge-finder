@@ -1,0 +1,6 @@
+# Fingerprints gitleaks should not report, one per line: commit:path:rule:line.
+# These two are a fake Odds API key in test fixtures from the first commit of
+# PR #5. It was never a real credential and was replaced by a low-entropy
+# placeholder in 6414ccf, but the commit stays in the PR's history.
+704d0950902f0b628ce5667ff9f3cca619fe7928:tests/test_sportsbook_client.py:generic-api-key:15
+704d0950902f0b628ce5667ff9f3cca619fe7928:tests/test_odds.py:generic-api-key:73

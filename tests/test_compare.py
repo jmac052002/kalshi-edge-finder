@@ -9,7 +9,7 @@ import pytest
 from kalshi_edge.compare import main, report_to_json, run
 from kalshi_edge.fees import UnknownFeeTypeError
 from kalshi_edge.parse import SeriesFee, parse_market, parse_snapshot
-from kalshi_edge.sportsbook.parse import parse_odds_payload
+from kalshi_edge.sportsbook.parse import SOURCE, OddsCapture, parse_odds_payload
 from kalshi_edge.sportsbook.teams import DEFAULT_TABLE_PATH, TeamTable
 from kalshi_edge.store import MarketStore
 
@@ -61,7 +61,8 @@ def db_path(tmp_path):
             captured_at="2026-11-07T12:00:00Z",
         )
         store.save_page([], [old])
-        store.save_odds(parse_odds_payload(json.loads(FIXTURE.read_text()), captured_at=ODDS_AT))
+        odds_rows = parse_odds_payload(json.loads(FIXTURE.read_text()), captured_at=ODDS_AT)
+        store.save_odds(OddsCapture(SOURCE, "americanfootball_nfl", ODDS_AT, "us,eu", 2, len(odds_rows)), odds_rows)
         store.save_series_fee(SeriesFee("KXNFLGAME", "quadratic", "1", KALSHI_AT))
     return path
 
@@ -174,3 +175,15 @@ def test_report_json_roundtrip_has_strings_for_money(db_path):
     side = data["events"][0]["sides"][0]
     assert side["evaluation"]["fee_total"] == "0.18"  # ATL YES at 0.56 x 10: 0.07*10*0.2464 = 0.17248 -> $0.18
     assert isinstance(side["evaluation"]["ev"], float)
+
+
+def test_empty_capture_supersedes_older_odds(db_path, capsys):
+    """Codex review: a successful run with no lines must not leave compare on stale odds."""
+    with MarketStore(db_path) as store:
+        store.save_odds(OddsCapture(SOURCE, "americanfootball_nfl", "2026-11-08T17:40:00Z", "us,eu", 0, 0), [])
+        report = run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="x", contracts=1, budget=None)
+    assert report.odds_captured_at == "2026-11-08T17:40:00Z"
+    assert report.odds_rows == 0
+    assert report.events == [] and report.unmatched == []
+    assert main(["--series", "KXNFLGAME", "--db", str(db_path)]) == 0
+    assert "newest sportsbook capture has no moneylines" in capsys.readouterr().out
