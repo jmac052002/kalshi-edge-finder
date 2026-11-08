@@ -263,12 +263,12 @@ def test_pre_event_price_cache_roundtrip(store):
     store.save_page([_market("MKT-1", result="yes"), _market("MKT-2", result="no")], [])
     hit = PreEventPrice(
         ticker="MKT-1", series_ticker="KXNFLGAME", cutoff_ts=1794160800,
-        cutoff_source="occurrence_datetime", candle_end_ts=1794153600,
+        cutoff_source="occurrence_datetime", start_ts=1793901600, candle_end_ts=1794153600,
         yes_bid=0.42, yes_ask=0.46, last_price=0.44, fetched_at="2026-11-09T00:00:00Z",
     )
     miss = PreEventPrice(
         ticker="MKT-2", series_ticker="KXNFLGAME", cutoff_ts=1794160800,
-        cutoff_source="close_time", candle_end_ts=None,
+        cutoff_source="close_time", start_ts=1793901600, candle_end_ts=None,
         yes_bid=None, yes_ask=None, last_price=None, fetched_at="2026-11-09T00:00:00Z",
     )
     store.save_pre_event_price(hit)
@@ -293,3 +293,40 @@ def test_settled_markets_query(store):
     )
     store.conn.execute("UPDATE markets SET series_ticker = 'OTHER' WHERE ticker = 'D'")
     assert [r["ticker"] for r in store.settled_markets("KXNFLGAME")] == ["A", "B"]
+
+
+def test_pre_event_price_answers_only_its_window():
+    from kalshi_edge.parse import PreEventPrice
+
+    base = dict(ticker="T", series_ticker="S", cutoff_ts=1000, cutoff_source="occurrence_datetime",
+                start_ts=500, fetched_at="now", yes_bid=0.4, yes_ask=0.42, last_price=0.41)
+    hit = PreEventPrice(candle_end_ts=900, **base)
+    assert hit.answers(start_ts=500, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+    assert hit.answers(start_ts=900, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+    assert not hit.answers(start_ts=901, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+    assert not hit.answers(start_ts=500, cutoff_ts=999, cutoff_source="occurrence_datetime")
+    assert not hit.answers(start_ts=500, cutoff_ts=1000, cutoff_source="close_time")
+
+    miss = PreEventPrice(candle_end_ts=None, **{**base, "yes_bid": None, "yes_ask": None, "last_price": None})
+    assert miss.answers(start_ts=500, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+    assert miss.answers(start_ts=600, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+    assert not miss.answers(start_ts=400, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+
+
+def test_cache_table_without_window_columns_is_rebuilt(tmp_path):
+    path = tmp_path / "cache.db"
+    with MarketStore(path) as store:
+        store.conn.executescript(
+            """
+            DROP TABLE pre_event_prices;
+            CREATE TABLE pre_event_prices (ticker TEXT PRIMARY KEY, series_ticker TEXT NOT NULL,
+                cutoff_ts INTEGER NOT NULL, cutoff_source TEXT NOT NULL, candle_end_ts INTEGER,
+                yes_bid REAL, yes_ask REAL, last_price REAL, fetched_at TEXT NOT NULL);
+            INSERT INTO pre_event_prices VALUES ('X', 'S', 1, 'close_time', NULL, NULL, NULL, NULL, 'now');
+            """
+        )
+        store.conn.commit()
+    with MarketStore(path) as store:
+        columns = {row[1] for row in store.conn.execute("PRAGMA table_info(pre_event_prices)")}
+        assert "start_ts" in columns
+        assert store.pre_event_prices("S") == {}

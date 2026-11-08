@@ -350,17 +350,24 @@ class PreEventPrice:
 
     ``cutoff_ts`` is the Unix second we treat as the start of the event, and
     ``cutoff_source`` says which market field it came from (see
-    ``calibrate.event_cutoff``). ``candle_end_ts`` is the end of the candle
-    the quotes were read from; it is at or before the cutoff by construction.
-    A contract with no usable candle in the lookback window is stored with
-    ``candle_end_ts`` and the quotes ``None`` so a rerun does not ask the
-    exchange again. ``--refresh`` on the CLI clears that memory.
+    ``calibrate.event_cutoff``). ``start_ts`` is the start of the window that
+    was searched. ``candle_end_ts`` is the end of the candle the quotes were
+    read from; it is at or before the cutoff by construction. A contract with
+    no usable candle in the window is stored with ``candle_end_ts`` and the
+    quotes ``None`` so a rerun does not ask the exchange again.
+
+    The row is a cache entry, and the question it answers is "last two-sided
+    quote in ``[start_ts, cutoff_ts]``". :meth:`answers` says whether it
+    answers that question for a different window, so a rerun with another
+    ``--lead-hours`` or ``--lookback-hours`` refetches instead of silently
+    reusing a quote from the wrong time. ``--refresh`` clears everything.
     """
 
     ticker: str
     series_ticker: str
     cutoff_ts: int
     cutoff_source: str
+    start_ts: int
     candle_end_ts: int | None
     yes_bid: float | None
     yes_ask: float | None
@@ -373,12 +380,28 @@ class PreEventPrice:
             return None
         return (self.yes_bid + self.yes_ask) / 2
 
+    def answers(self, *, start_ts: int, cutoff_ts: int, cutoff_source: str) -> bool:
+        """Whether this cached row is the answer for the given window.
+
+        The cutoff and its source must match exactly: a quote taken as of
+        kickoff is not the quote as of twelve hours before it. A hit is
+        still valid for a narrower window as long as the candle it found is
+        inside that window. A miss is only valid if the window it searched
+        covered the one asked for; a wider search could find something.
+        """
+        if cutoff_ts != self.cutoff_ts or cutoff_source != self.cutoff_source:
+            return False
+        if self.candle_end_ts is not None:
+            return self.candle_end_ts >= start_ts
+        return self.start_ts <= start_ts
+
     def as_tuple(self) -> tuple:
         return (
             self.ticker,
             self.series_ticker,
             self.cutoff_ts,
             self.cutoff_source,
+            self.start_ts,
             self.candle_end_ts,
             self.yes_bid,
             self.yes_ask,

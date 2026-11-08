@@ -195,7 +195,12 @@ def fetch_pre_event_prices(
 ) -> tuple[dict[str, PreEventPrice], FetchStats]:
     """Make sure every settled market has a cached pre-event quote.
 
-    Each uncached market costs one request. Results are committed one row
+    The cutoff is computed first and a cached row is reused only when it
+    answers that exact window (same cutoff and source, and a window that
+    covers the request). Otherwise a run with ``--lead-hours 12`` after a
+    default run would quietly reuse kickoff quotes and report an
+    earlier-time backtest it never performed. Each market that is not
+    served from the cache costs one request. Results are committed one row
     at a time so an interrupted run keeps its progress. A market the
     exchange answers 404 for (archived contracts can lack candlesticks) is
     cached as a miss rather than retried forever.
@@ -210,22 +215,30 @@ def fetch_pre_event_prices(
     lookback = int(lookback_hours * 3600)
     for market in markets:
         ticker = market["ticker"]
-        if ticker in cached:
-            stats.cached += 1
-            continue
-        if max_fetch is not None and stats.fetched >= max_fetch:
-            break
         cutoff = event_cutoff(market, event_hours=event_hours, lead_hours=lead_hours)
         if cutoff is None:
             stats.no_event_time += 1
+            # A stale row from a run that still had an event time would be
+            # a quote for a window we can no longer define.
+            cached.pop(ticker, None)
             logger.warning("%s has no event time; skipping", ticker)
             continue
         cutoff_ts, source = cutoff
+        start_ts = cutoff_ts - lookback
+        hit = cached.get(ticker)
+        if hit is not None and hit.answers(start_ts=start_ts, cutoff_ts=cutoff_ts, cutoff_source=source):
+            stats.cached += 1
+            continue
+        # Anything left in ``cached`` is handed back as the answer, so a row
+        # for the wrong window must not survive a max_fetch cutoff.
+        cached.pop(ticker, None)
+        if max_fetch is not None and stats.fetched >= max_fetch:
+            break
         try:
             raw = client.get_candlesticks(
                 series_ticker=series_ticker,
                 ticker=ticker,
-                start_ts=cutoff_ts - lookback,
+                start_ts=start_ts,
                 end_ts=cutoff_ts,
                 period_interval=60,
             )
@@ -244,6 +257,7 @@ def fetch_pre_event_prices(
             series_ticker=series_ticker,
             cutoff_ts=cutoff_ts,
             cutoff_source=source,
+            start_ts=start_ts,
             candle_end_ts=None if candle is None else candle.end_ts,
             yes_bid=None if candle is None else candle.yes_bid,
             yes_ask=None if candle is None else candle.yes_ask,

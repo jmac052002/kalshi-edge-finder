@@ -103,14 +103,17 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
 );
 
 -- One row per contract: the pre-event quote recovered from candlesticks.
--- cutoff_ts is the Unix second treated as the event start. candle_end_ts and
--- the quotes are NULL when no candle with a two-sided book was found before
--- the cutoff; the row still exists so the miss is remembered.
+-- cutoff_ts is the Unix second treated as the event start and start_ts the
+-- beginning of the window searched. candle_end_ts and the quotes are NULL
+-- when no candle with a two-sided book was found in the window; the row
+-- still exists so the miss is remembered. A row only counts as a cache hit
+-- when its window matches the one asked for (PreEventPrice.answers).
 CREATE TABLE IF NOT EXISTS pre_event_prices (
     ticker TEXT PRIMARY KEY,
     series_ticker TEXT NOT NULL,
     cutoff_ts INTEGER NOT NULL,
     cutoff_source TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
     candle_end_ts INTEGER,
     yes_bid REAL,
     yes_ask REAL,
@@ -210,13 +213,14 @@ ON CONFLICT(ticker, captured_at) DO UPDATE SET
 
 _UPSERT_PRE_EVENT = """
 INSERT INTO pre_event_prices (
-    ticker, series_ticker, cutoff_ts, cutoff_source, candle_end_ts,
+    ticker, series_ticker, cutoff_ts, cutoff_source, start_ts, candle_end_ts,
     yes_bid, yes_ask, last_price, fetched_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(ticker) DO UPDATE SET
     series_ticker = excluded.series_ticker,
     cutoff_ts = excluded.cutoff_ts,
     cutoff_source = excluded.cutoff_source,
+    start_ts = excluded.start_ts,
     candle_end_ts = excluded.candle_end_ts,
     yes_bid = excluded.yes_bid,
     yes_ask = excluded.yes_ask,
@@ -266,6 +270,13 @@ class MarketStore:
         for column in _MARKET_COLUMNS_SINCE_V1:
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE markets ADD COLUMN {column} TEXT")
+        # pre_event_prices is a cache of public data. A copy written before
+        # the window columns existed cannot be validated, so it is dropped and
+        # rebuilt by the next calibrate run rather than migrated.
+        if "pre_event_prices" in tables:
+            cache_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(pre_event_prices)")}
+            if "start_ts" not in cache_columns:
+                self.conn.execute("DROP TABLE pre_event_prices")
 
     def close(self) -> None:
         self.conn.close()
@@ -315,6 +326,7 @@ class MarketStore:
                 series_ticker=row["series_ticker"],
                 cutoff_ts=int(row["cutoff_ts"]),
                 cutoff_source=row["cutoff_source"],
+                start_ts=int(row["start_ts"]),
                 candle_end_ts=row["candle_end_ts"],
                 yes_bid=row["yes_bid"],
                 yes_ask=row["yes_ask"],

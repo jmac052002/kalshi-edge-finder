@@ -170,6 +170,61 @@ def test_fetch_caches_quotes_and_misses(store):
     assert refreshed.fetched == 2 and len(client.calls) == 4
 
 
+def test_cache_is_not_reused_for_a_different_window(store):
+    """Codex finding on PR #3: a --lead-hours rerun must not reuse kickoff quotes."""
+    cin = _settled("KXNFLGAME-26NOV08CINATL-CIN", "KXNFLGAME-26NOV08CINATL", "yes")
+    store.save_page([cin], [])
+    client = FakeClient({cin.ticker: CANDLES})
+    markets = store.settled_markets("KXNFLGAME")
+    kwargs = dict(store=store, client=client, series_ticker="KXNFLGAME", markets=markets, now=NOW)
+
+    prices, _ = fetch_pre_event_prices(**kwargs)
+    assert prices[cin.ticker].candle_end_ts == KICKOFF_TS - 2 * 3600
+
+    # Twelve hours earlier: a new window, so a new request, and the 15:00 and
+    # 16:00 candles are now after the cutoff.
+    prices, stats = fetch_pre_event_prices(**kwargs, lead_hours=12)
+    assert stats.fetched == 1 and stats.cached == 0 and len(client.calls) == 2
+    assert client.calls[-1]["end_ts"] == KICKOFF_TS - 12 * 3600
+    assert prices[cin.ticker].cutoff_ts == KICKOFF_TS - 12 * 3600
+    assert prices[cin.ticker].candle_end_ts is None  # fixture has nothing that early
+
+    # Same lead again is a hit. A wider lookback after a miss must search again.
+    _, stats = fetch_pre_event_prices(**kwargs, lead_hours=12)
+    assert stats.cached == 1 and len(client.calls) == 2
+    _, stats = fetch_pre_event_prices(**kwargs, lead_hours=12, lookback_hours=200)
+    assert stats.fetched == 1 and len(client.calls) == 3
+
+    # Back to kickoff: refetched, then a narrower window that excludes the
+    # found candle is refetched too, while one that still contains it is a hit.
+    prices, stats = fetch_pre_event_prices(**kwargs)
+    assert stats.fetched == 1 and len(client.calls) == 4
+    _, stats = fetch_pre_event_prices(**kwargs, lookback_hours=3)
+    assert stats.cached == 1 and len(client.calls) == 4
+    _, stats = fetch_pre_event_prices(**kwargs, lookback_hours=1)
+    assert stats.fetched == 1 and len(client.calls) == 5
+
+    # A changed event time (fallback source) is also a different window.
+    store.conn.execute("UPDATE markets SET occurrence_datetime = NULL WHERE ticker = ?", (cin.ticker,))
+    store.conn.commit()
+    kwargs["markets"] = store.settled_markets("KXNFLGAME")
+    prices, stats = fetch_pre_event_prices(**kwargs)
+    assert stats.fetched == 1 and prices[cin.ticker].cutoff_source == "expected_expiration_time"
+
+
+def test_stale_cache_row_is_not_returned_when_max_fetch_stops_early(store):
+    cin = _settled("KXNFLGAME-26NOV08CINATL-CIN", "KXNFLGAME-26NOV08CINATL", "yes")
+    store.save_page([cin], [])
+    client = FakeClient({cin.ticker: CANDLES})
+    markets = store.settled_markets("KXNFLGAME")
+    fetch_pre_event_prices(store=store, client=client, series_ticker="KXNFLGAME", markets=markets, now=NOW)
+    prices, stats = fetch_pre_event_prices(
+        store=store, client=client, series_ticker="KXNFLGAME", markets=markets, now=NOW,
+        lead_hours=12, max_fetch=0,
+    )
+    assert stats.fetched == 0 and cin.ticker not in prices
+
+
 def test_fetch_404_is_cached_and_other_errors_propagate(store):
     missing = _settled("KXNFLGAME-26AUG29CHITEN-CHI", "KXNFLGAME-26AUG29CHITEN", "no")
     broken = _settled("KXNFLGAME-26AUG29CHITEN-TEN", "KXNFLGAME-26AUG29CHITEN", "yes")

@@ -47,7 +47,7 @@ Requests are spaced (default 0.25s) and retried with exponential backoff on conn
 
 **What the numbers do not say.** The ROI is for one contract per market. A multi-leg parlay multiplies its legs: if each leg is fairly priced and costs a fee, the combination's expected return is the product of each leg's (negative) expected return, which is worse, not better, than the legs alone. Nothing in this table turns a long-shot combo into a positive-expectation bet.
 
-Pre-event quotes are cached in the `pre_event_prices` table, one request per market on the first run and none after. `--refresh` throws the cache away. `--max-fetch N` caps the number of candlestick requests, for a quick first look at a big series.
+Pre-event quotes are cached in the `pre_event_prices` table, one request per market on the first run and none after. A cached row is reused only when it answers the window being asked for: change `--lead-hours`, `--event-hours`, or `--lookback-hours`, or collect a new event time, and the affected markets are fetched again rather than served a quote from the wrong moment. `--refresh` throws the whole cache away. `--max-fetch N` caps the number of candlestick requests, for a quick first look at a big series.
 
 ## Setup
 
