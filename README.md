@@ -83,7 +83,7 @@ Candlesticks (`GET /series/{series_ticker}/markets/{ticker}/candlesticks`) and t
 
 SQLite, schema version 1 in `schema_meta`.
 
-`markets` — one row per ticker. Reruns update the row. `source` is `live` or `historical`. If a ticker appears in both during an archive handoff, the live row is kept.
+`markets` — one row per ticker. Reruns update the row. `source` is `live` or `historical`. A live row that already has a `result` is kept when the same ticker also shows up in the archive. A snapshot of a market that had not resolved yet does not block a later historical settlement: after Kalshi archives the contract, that archive row is the only copy of the payoff. The open-market price snapshot stays either way.
 
 `price_snapshots` — primary key `(ticker, captured_at)`. Float columns are the parsed dollar prices. `yes_bid_dollars` and the other `*_dollars` columns keep the API's original strings.
 

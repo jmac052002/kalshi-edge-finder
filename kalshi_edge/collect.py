@@ -137,8 +137,9 @@ def run(
             {"status": "open", "historical": False, "source": "live", "snapshots": True},
         )
     elif mode == "settled":
-        # Archive first, then the live settled list, so a ticker present in
-        # both keeps the live copy (the store also enforces that).
+        # Archive first, then the live settled list. When both copies carry a
+        # result, the live one wins. A snapshot that never got a result does
+        # not block the archive write; that row is the case the store fills in.
         jobs = (
             {
                 "status": None,

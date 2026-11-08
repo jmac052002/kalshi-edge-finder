@@ -93,19 +93,85 @@ def test_snapshot_new_timestamp_appends_history(store):
     assert prices == pytest.approx([0.40, 0.70])
 
 
-def test_live_row_is_not_overwritten_by_historical(store):
-    store.save_page([_market()], [])
+def test_historical_settlement_fills_snapshotted_market(store):
+    """Regression: an open snapshot must not block a later archive settlement.
+
+    Snapshot mode writes source='live' with no result. If Kalshi archives the
+    contract before the next settled run, the historical payload is the only
+    copy of the payoff. Rejecting it leaves status='active' and result NULL,
+    so the pre-event snapshot can never be scored. The snapshot row itself
+    stays; that price is the forecast, and the result is the outcome.
+    """
+    store.save_page([_market()], [_snapshot()])
     historical = parse_market(
-        {"ticker": "MKT-1", "title": "Stale archive copy", "result": "no", "status": "finalized"},
+        {
+            "ticker": "MKT-1",
+            "title": "Archived after the snapshot",
+            "status": "finalized",
+            "result": "yes",
+            "settlement_value_dollars": "1.0000",
+        },
+        series_ticker="KXNFLGAME",
+        source="historical",
+        fetched_at="2026-11-09T12:00:00Z",
+    )
+    store.save_page([historical], [])
+    row = store.conn.execute(
+        """
+        SELECT status, result, settlement_value, source, fetched_at
+        FROM markets
+        """
+    ).fetchone()
+    assert row["status"] == "finalized"
+    assert row["result"] == "yes"
+    assert row["settlement_value"] == pytest.approx(1.0)
+    assert row["source"] == "historical"
+    assert row["fetched_at"] == "2026-11-09T12:00:00Z"
+    assert store.counts()["markets"] == 1
+    assert store.counts()["with_result"] == 1
+    # The quote captured while the market was open is still the forecast.
+    assert store.counts()["snapshots"] == 1
+    snap = store.conn.execute("SELECT yes_bid, captured_at FROM price_snapshots").fetchone()
+    assert snap["yes_bid"] == pytest.approx(0.40)
+    assert snap["captured_at"] == "2026-11-08T19:00:00Z"
+
+
+def test_settled_live_row_wins_over_historical(store):
+    """A live settlement is newer than an overlapping archive copy."""
+    live = parse_market(
+        {
+            "ticker": "MKT-1",
+            "title": "Live settled",
+            "status": "finalized",
+            "result": "yes",
+            "settlement_value_dollars": "1.0000",
+        },
+        series_ticker="KXNFLGAME",
+        source="live",
+        fetched_at="2026-11-08T19:00:00Z",
+    )
+    store.save_page([live], [])
+    historical = parse_market(
+        {
+            "ticker": "MKT-1",
+            "title": "Stale archive copy",
+            "status": "finalized",
+            "result": "no",
+            "settlement_value_dollars": "0.0000",
+        },
         series_ticker="KXNFLGAME",
         source="historical",
         fetched_at="2026-11-08T18:00:00Z",
     )
     store.save_page([historical], [])
-    row = store.conn.execute("SELECT title, source, result FROM markets").fetchone()
-    assert row["title"] == "Original"
+    row = store.conn.execute(
+        "SELECT title, source, result, settlement_value, status FROM markets"
+    ).fetchone()
+    assert row["title"] == "Live settled"
     assert row["source"] == "live"
-    assert row["result"] is None
+    assert row["status"] == "finalized"
+    assert row["result"] == "yes"
+    assert row["settlement_value"] == pytest.approx(1.0)
     assert store.counts()["markets"] == 1
 
 

@@ -16,8 +16,13 @@ it. Nothing here deletes a row, so a second settled run cannot wipe a
 snapshot taken earlier.
 
 ``source`` is ``live`` for ``GET /markets`` and ``historical`` for
-``GET /historical/markets``. If a ticker shows up in both during an archive
-handoff, the live row wins: it is the copy Kalshi has not moved yet.
+``GET /historical/markets``. A live row that already has a ``result`` wins
+over an overlapping historical copy, because that settlement is the one
+Kalshi has not archived yet. A live row with no ``result`` is only an open
+snapshot. If that contract is archived before the next settled run, the
+historical row is the only copy of the payoff, so it is allowed to fill the
+result in. The price snapshot taken while the market was open is left in
+place; that is the forecast a calibration check compares to the payoff.
 """
 
 from __future__ import annotations
@@ -130,7 +135,14 @@ ON CONFLICT(ticker) DO UPDATE SET
     open_interest = excluded.open_interest,
     source = excluded.source,
     fetched_at = excluded.fetched_at
-WHERE markets.source != 'live' OR excluded.source = 'live'
+-- Live always writes. A historical row may refresh another historical row.
+-- It may also fill a live row that has no result yet: that row is an open
+-- snapshot, and once Kalshi archives the contract the payoff exists only in
+-- the historical payload. A live row that already settled is kept, so an
+-- overlapping archive copy cannot blank out a result we already stored.
+WHERE excluded.source = 'live'
+   OR markets.source != 'live'
+   OR (markets.result IS NULL AND excluded.result IS NOT NULL)
 """
 
 _UPSERT_SNAPSHOT = """
