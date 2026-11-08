@@ -69,7 +69,7 @@ Pre-event quotes are cached in the `pre_event_prices` table, one request per mar
 
 **Matching games.** A Kalshi event ticker like `KXNFLGAME-26NOV08CINATL` carries the game date (US Eastern) and two team codes run together. The codes are not fixed width (`GB`, `KC`, `LA`, `LAC`, `LAR`...), so the parser tries every split against the checked-in alias table `config/teams/nfl.json` and uses the contract tickers (`...-CIN`, `...-ATL`) to settle anything ambiguous. A sportsbook game matches when it has the same two teams and its kickoff falls on that date in US Eastern time. Exactly one candidate is a match; zero or several are reported as unmatched, never guessed. `close_time` is never used: on an open market it can sit days after kickoff. Checked against 505 real events: all parse, and a Thursday night ticker (`26AUG06`) lines up with a 00:00Z Friday kickoff, which confirms the Eastern-date rule.
 
-**Time gap.** The report prints how far apart the Kalshi snapshot and the odds capture were and flags `STALE` past `--max-gap-minutes` (default 15). An "edge" between a line from noon and a price from 3 pm is just line movement.
+**Time gap and live games.** The report prints how far apart the Kalshi snapshot and the odds capture were and flags `STALE` past `--max-gap-minutes` (default 15). An "edge" between a line from noon and a price from 3 pm is just line movement. Games that have already kicked off are listed but not priced: in-play book lines and Kalshi's live market move at different speeds, so a gap between them is lag. `--include-live` prices them anyway, tagged `IN PLAY`.
 
 **Combos.** `kalshi_edge.odds_math.combo` computes the fair multiplier and EV of a parlay under an independence assumption, so the gap between the offered and fair payout is visible. There is no CLI for it and the tool never searches for or ranks combos: at $10 on a typical three-leg parlay the expected loss is about $1.35, and the honest output of a combo evaluator is almost always a negative number.
 
@@ -140,6 +140,8 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt   # pytest, only for tests
 ```
 
+On Windows, WSL works the same way; make the virtual environment inside the shell you will run from, because a Windows `.venv` cannot be used from WSL or the other way round (`.venv*` is gitignored, so a second one such as `.venv-wsl` is fine).
+
 `requirements.txt` is `requests` plus `tzdata` (time zone data for the game matcher; Windows does not ship it). The database file is created on first run at `data/kalshi.db` (override with `--db`). That directory is gitignored.
 
 ## Usage
@@ -178,35 +180,54 @@ python -m kalshi_edge.compare --series KXNFLGAME
 python -m kalshi_edge.compare --series KXNFLGAME --devig multiplicative --reference median --contracts 10 --json compare.json
 ```
 
-Odds flags: `--sport KEY`, `--regions us,eu`, `--min-remaining N`, `--db PATH`, `--base-url URL`. Compare flags: `--devig power|multiplicative`, `--reference pinnacle|median`, `--budget DOLLARS` or `--contracts N`, `--max-gap-minutes M`, `--teams PATH`, `--json PATH`.
+Odds flags: `--sport KEY`, `--regions us,eu`, `--min-remaining N`, `--db PATH`, `--base-url URL`. Compare flags: `--devig power|multiplicative`, `--reference pinnacle|median`, `--budget DOLLARS` or `--contracts N`, `--max-gap-minutes M`, `--include-live`, `--teams PATH`, `--json PATH`.
 
 ### Sample comparison output
 
-From the test fixture (`tests/fixtures/odds_api_nfl.json` plus two Kalshi snapshots), so the numbers are illustrative; a live run will replace this block. The first game is the worked example from the design doc: Pinnacle `1.80 / 2.10`, Bengals YES at 0.45. The second has no Pinnacle line, so the reference falls back to a median.
+Real output from the first live run on 2026-11-08, about 20 minutes into the 4:25 pm Eastern games. The odds capture cost 2 credits (498 left), came back with 29 bookmakers and 8 games, and the Kalshi snapshot followed one second later. The report shown is from rerunning `compare` against that database with the current code.
 
 ```text
-compare  series=KXNFLGAME  sport=americanfootball_nfl  generated=2026-11-08T17:36:00Z
+compare  series=KXNFLGAME  sport=americanfootball_nfl  generated=2026-11-08T21:44:38Z
 devig=power  reference=pinnacle  budget=$10
-kalshi snapshot=2026-11-08T17:35:30Z  odds capture=2026-11-08T17:31:02Z  gap=4m  (max 15m)
-fees: quadratic x1 from GET /series (fetched 2026-11-08T17:35:30Z)
-open contracts=6  matched events=2  unmatched=1
+kalshi snapshot=2026-11-08T21:40:01Z  odds capture=2026-11-08T21:40:00Z  gap=0m  (max 15m)
+fees: quadratic_with_maker_fees x1 from GET /series (fetched 2026-11-08T21:40:01Z)
+open contracts=40  matched events=2  unmatched=14
 
-KXNFLGAME-26NOV08CINATL  Cincinnati Bengals at Atlanta Falcons  kickoff 2026-11-08T18:00:00Z  ref=pinnacle (17:30Z)  books=3
+KXNFLGAME-26NOV08TBCHI  Tampa Bay Buccaneers at Chicago Bears  kickoff 2026-11-09T01:20:00Z  ref=pinnacle (21:39Z)  books=28
  contract side    ask    n  fee/ct brkeven   fair    alt    edge    ev/ct     roi
- ATL      YES    0.56   17  0.0176  0.5776 0.5403 0.5385  -3.7pp  -0.0374   -6.5%
- ATL      NO     0.45   21  0.0176  0.4676 0.4597 0.4615  -0.8pp  -0.0079   -1.7%
- CIN      YES    0.45   21  0.0176  0.4676 0.4597 0.4615  -0.8pp  -0.0079   -1.7%
- CIN      NO     0.56   17  0.0176  0.5776 0.5403 0.5385  -3.7pp  -0.0374   -6.5%
+ CHI      YES    0.72   13  0.0146  0.7346 0.7027 0.6943  -3.2pp  -0.0319   -4.3%
+ CHI      NO     0.29   32  0.0147  0.3047 0.2973 0.3057  -0.7pp  -0.0074   -2.4%
+ TB       YES    0.29   32  0.0147  0.3047 0.2973 0.3057  -0.7pp  -0.0074   -2.4%
+ TB       NO     0.72   13  0.0146  0.7346 0.7027 0.6943  -3.2pp  -0.0319   -4.3%
 
-KXNFLGAME-26NOV16LACBAL  Los Angeles Chargers at Baltimore Ravens  kickoff 2026-11-17T01:15:00Z  ref=median of 3 books  books=3
+KXNFLGAME-26NOV09BUFMIN  Buffalo Bills at Minnesota Vikings  kickoff 2026-11-10T01:15:00Z  ref=pinnacle (21:39Z)  books=28
  contract side    ask    n  fee/ct brkeven   fair    alt    edge    ev/ct     roi
- BAL      YES    0.68   14  0.0157  0.6957 0.6508 0.6429  -4.5pp  -0.0449   -6.5%
- BAL      NO     0.34   28  0.0157  0.3557 0.3492 0.3571  -0.7pp  -0.0065   -1.8%
- LAC      YES    0.33   28  0.0157  0.3457 0.3492 0.3571  +0.3pp  +0.0035   +1.0%
- LAC      NO     0.69   14  0.0150  0.7050 0.6508 0.6429  -5.4pp  -0.0542   -7.7%
+ BUF      YES    0.62   15  0.0167  0.6367 0.6213 0.6152  -1.5pp  -0.0154   -2.4%
+ BUF      NO     0.39   24  0.0167  0.4067 0.3787 0.3848  -2.8pp  -0.0280   -6.9%
+ MIN      YES    0.39   24  0.0167  0.4067 0.3787 0.3848  -2.8pp  -0.0280   -6.9%
+ MIN      NO     0.62   15  0.0167  0.6367 0.6213 0.6152  -1.5pp  -0.0154   -2.4%
 
-unmatched (1):
-  KXNFLGAME-26NOV08KCBUF: Buffalo Bills vs Kansas City Chiefs: no sportsbook game with these teams
+in play, not priced (4; live book lines move faster than Kalshi's, so any gap is lag; --include-live shows them anyway):
+  KXNFLGAME-26NOV08ARISEA  kickoff 2026-11-08T21:25:42Z
+  KXNFLGAME-26NOV08GBNE  kickoff 2026-11-08T21:25:34Z
+  KXNFLGAME-26NOV08HOULAC  kickoff 2026-11-08T21:05:49Z
+  KXNFLGAME-26NOV08LVSF  kickoff 2026-11-08T21:25:35Z
+
+unmatched (14; the odds feed covered kickoffs from 2026-11-08T18:02:45Z to 2026-11-10T01:15:00Z):
+  KXNFLGAME-26NOV12WASNYG: New York Giants vs Washington Commanders: no sportsbook game with these teams
+  KXNFLGAME-26NOV15BUFNYJ: Buffalo Bills vs New York Jets: no sportsbook game with these teams
+  KXNFLGAME-26NOV15CARNO: Carolina Panthers vs New Orleans Saints: no sportsbook game with these teams
+  KXNFLGAME-26NOV15HOUCLE: Cleveland Browns vs Houston Texans: no sportsbook game with these teams
+  KXNFLGAME-26NOV15JACTEN: Jacksonville Jaguars vs Tennessee Titans: no sportsbook game with these teams
+  KXNFLGAME-26NOV15KCATL: Atlanta Falcons vs Kansas City Chiefs: no sportsbook game with these teams
+  KXNFLGAME-26NOV15LARARI: Arizona Cardinals vs Los Angeles Rams: no sportsbook game with these teams
+  KXNFLGAME-26NOV15MIAIND: Indianapolis Colts vs Miami Dolphins: no sportsbook game with these teams
+  KXNFLGAME-26NOV15MINGB: Green Bay Packers vs Minnesota Vikings: no sportsbook game with these teams
+  KXNFLGAME-26NOV15NEDET: Detroit Lions vs New England Patriots: no sportsbook game with these teams
+  KXNFLGAME-26NOV15PITCIN: Cincinnati Bengals vs Pittsburgh Steelers: no sportsbook game with these teams
+  KXNFLGAME-26NOV15SEALV: Las Vegas Raiders vs Seattle Seahawks: no sportsbook game with these teams
+  KXNFLGAME-26NOV15SFDAL: Dallas Cowboys vs San Francisco 49ers: no sportsbook game with these teams
+  KXNFLGAME-26NOV16LACBAL: Baltimore Ravens vs Los Angeles Chargers: no sportsbook game with these teams
 
 columns: ask = Kalshi ask; n = contracts; fee/ct = taker fee per contract; brkeven = win probability needed to break even; fair = de-vigged reference probability (power); alt = same with multiplicative; edge = fair - brkeven; ev/ct = expected profit per contract in dollars; roi = ev / cost.
 read this honestly:
@@ -216,66 +237,13 @@ read this honestly:
   - a wide time gap between captures means the 'edge' may just be line movement
 ```
 
-Four rows per game because buying NO on one team and YES on the other are the same bet at possibly different asks; the table shows both so the cheaper one is visible. The only positive cell, Chargers YES at +0.3 points, is a 28-contract order with an expected profit of ten cents, against a median of three books and with unknown depth at the ask. That is what a typical "edge" looks like.
+How to read it:
 
-### Sample calibration output
-
-Real output from a run on 2026-11-08, after `collect --mode settled --series KXNFLGAME` had stored 1,010 settled contracts (505 games). Only 246 contracts, 122 games played between 9 September and 8 November 2026, have candlestick history: Kalshi's candlestick endpoint returns 404 for every market archived before its 2026-09-09 cutoff, which the report counts as `not_found`. The default window (`--event-hours 4`, so the last two-sided hourly bar before the scheduled kickoff):
-
-```text
-calibration  series=KXNFLGAME  generated=2026-11-08T20:44:10Z
-settled=1010  with_pre_event_quote=246  observations=122 (one contract per event)
-candles fetched=1010  cached=0  skipped: not_binary=14, no_quote=752, duplicate_event=122, not_found=764
-cutoff source: expected_expiration_time=6, occurrence_datetime=116
-brier=0.2223  base_rate=0.5492  base_rate_brier=0.2476
-
-   bucket      n  predicted    actual   yes ROI    no ROI   (buy at ask, taker fee, 1 contract(s))
-    0-10%      0          -         -         -         -
-   10-20%      6      14.8%     33.3%    +98.0%    -23.4%
-   20-30%     11      24.1%     18.2%    -31.7%     +4.4%
-   30-40%     18      35.7%     38.9%     +1.7%     -8.5%
-   40-50%     23      44.4%     52.2%    +11.2%    -17.7%
-   50-60%     17      56.0%     64.7%    +10.7%    -24.1%
-   60-70%     26      64.0%     73.1%     +9.8%    -30.0%
-   70-80%     16      75.1%     68.8%    -11.4%    +13.9%
-   80-90%      5      83.7%     60.0%    -29.9%   +119.8%
-  90-100%      0          -         -         -         -
-```
-
-The same markets priced twelve hours earlier (`--lead-hours 12`), served from the cache except for the 246 markets whose window changed:
-
-```text
-calibration  series=KXNFLGAME  generated=2026-11-08T20:45:26Z
-settled=1010  with_pre_event_quote=246  observations=122 (one contract per event)
-candles fetched=246  cached=764  skipped: not_binary=14, no_quote=752, duplicate_event=122
-cutoff source: expected_expiration_time=6, occurrence_datetime=116
-brier=0.2244  base_rate=0.5492  base_rate_brier=0.2476
-
-   bucket      n  predicted    actual   yes ROI    no ROI   (buy at ask, taker fee, 1 contract(s))
-    0-10%      0          -         -         -         -
-   10-20%      6      16.0%     33.3%    +85.2%    -22.5%
-   20-30%     11      25.5%     18.2%    -35.1%     +6.3%
-   30-40%     18      36.1%     38.9%     +0.7%     -7.9%
-   40-50%     23      44.6%     52.2%    +10.8%    -17.4%
-   50-60%     15      55.9%     60.0%     +2.7%    -14.2%
-   60-70%     28      63.6%     75.0%    +13.5%    -35.7%
-   70-80%     17      75.6%     64.7%    -17.2%    +31.3%
-   80-90%      4      84.5%     75.0%    -13.0%    +44.9%
-  90-100%      0          -         -         -         -
-```
-
-How to read it, honestly:
-
-- **The market is informative but not sharp.** A Brier score of 0.222 beats always predicting the base rate (0.248), and the pre-kickoff price is only slightly better than the price twelve hours earlier. There is information in these prices; it is not a lot.
-- **122 games is a small sample.** The standard error of an observed win rate with `n=23` is about 10 percentage points, so every bucket's "actual" column is consistent with its "predicted" column. The six-game and five-game buckets at the ends are noise: a +98% or +120% ROI on five or six contracts is one or two games going the other way, and the twelve-hour view already moves those cells around.
-- **ROI columns are not a strategy.** They say what buying every contract in that bucket, at the ask, with the taker fee, would have returned over this sample. With `n` this small, no cell clears the bar of being distinguishable from zero. The sample grows by about 30 games a week while `collect --mode settled` keeps running before markets age out of the candlestick archive.
-- **No contract traded at 10% or below, or 90% or above, in either window.** The empty end buckets are empty because there were no such quotes, not because the model was perfect there.
-
-The skip counts classify each contract by the first reason it drops out, in the order listed, so they add up with the kept rows: 14 non-binary (both sides of seven ties, which settle `scalar`), then 752 without a quote, then 122 duplicates of a game already kept, plus the 122 observations, is 1,010. `with_pre_event_quote` is counted before that filter, which is why it is 246 and not 244: two of the tied games had quotes.
-
-`KXNFLGAME` is the game-winner series (one contract per team). `KXNFLANYTD` is anytime touchdown. Any other series ticker works the same way.
-
-A practical way to build history is to run `snapshot` on a timer while the markets are open, and run `settled` after games finish. Two snapshot runs in the same UTC second collapse to one row per contract; a run a second later adds the next observation.
+- **Both pre-game games are negative on every side**, by 0.7 to 3.2 points against Pinnacle. That is the expected result: Kalshi's ask plus the fee is a little above the book's fair price. There is nothing to buy here, and the tool says so plainly.
+- **Four games were already in play and are listed, not priced.** Live book lines move on every snap, and Kalshi's live market lags them by a different amount each minute. In the first run, before this rule existed, those games showed "edges" of up to +2 points. They were latency, not mispricing. `--include-live` prices them anyway, tagged `IN PLAY`.
+- **The 14 unmatched games are next week's.** The free odds feed lists the next few days only (the window is printed), so there was nothing to match them to yet. They match once the books post lines.
+- Four rows per game because buying NO on one team and YES on the other are the same bet at possibly different asks; the table shows both so the cheaper one is visible.
+- `fees:` names the schedule the exchange reported for this series. `KXNFLGAME` charges `quadratic_with_maker_fees`, which for a taker is the same quadratic formula.
 
 ## How a price becomes a probability
 
@@ -349,7 +317,6 @@ The tests parse fixture payloads (a candlestick history and an Odds API response
 
 Not built. Nothing below is in this repository yet.
 
-* **Live comparison output in this README.** The sample above is from the test fixture. The first real run needs an Odds API key and the Kalshi API, neither of which the development environment can reach.
 * **Calibration from the snapshot history.** The backtest uses candlesticks; a second view built from `price_snapshots` (prices at the exact moments the collector ran) would cross-check it once enough snapshot runs exist.
 * **Calibration chart.** A PNG of predicted against realized rates per bucket. The `--json` report has everything a plot needs.
 * **Order book depth.** `compare` reports edge per contract at the ask. `GET /markets/{ticker}/orderbook` is public and would say how many contracts are actually there.

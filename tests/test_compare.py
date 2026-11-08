@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kalshi_edge.compare import main, report_to_json, run
+from kalshi_edge.compare import format_report, main, report_to_json, run
 from kalshi_edge.fees import UnknownFeeTypeError
 from kalshi_edge.parse import SeriesFee, parse_market, parse_snapshot
 from kalshi_edge.sportsbook.parse import SOURCE, OddsCapture, parse_odds_payload
@@ -133,14 +133,19 @@ def test_budget_sizing_and_median_reference(db_path):
 
 def test_main_prints_table_and_json_and_flags_stale(db_path, tmp_path, capsys):
     out_json = tmp_path / "report.json"
-    code = main(["--series", "kxnflgame", "--db", str(db_path), "--contracts", "10", "--json", str(out_json), "--max-gap-minutes", "2"])
+    # main() uses the real clock, which is after the fixture's kickoffs, so ask for live games.
+    code = main([
+        "--series", "kxnflgame", "--db", str(db_path), "--contracts", "10", "--json", str(out_json),
+        "--max-gap-minutes", "2", "--include-live",
+    ])
     out = capsys.readouterr().out
     assert code == 0
     assert "STALE" in out
     assert "KXNFLGAME-26NOV08CINATL  Cincinnati Bengals at Atlanta Falcons" in out
+    assert "IN PLAY" in out
     assert " CIN      YES    0.45   10  0.0180  0.4680 0.4597 0.4615  -0.8pp  -0.0083   -1.8%" in out
     assert "skipped KXNFLGAME-26NOV08KCBUF-BUF YES: no ask to buy at" not in out  # unmatched events have no rows
-    assert "unmatched (1):" in out
+    assert "unmatched (1; the odds feed covered kickoffs from" in out
     assert "read this honestly:" in out
     data = json.loads(out_json.read_text())
     assert data["stale"] is True
@@ -164,13 +169,13 @@ def test_unknown_fee_type_fails_loudly(db_path):
     with MarketStore(db_path) as store:
         store.save_series_fee(SeriesFee("KXNFLGAME", "flat", "1", KALSHI_AT))
         with pytest.raises(UnknownFeeTypeError):
-            run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="x", contracts=1, budget=None)
+            run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="2026-11-08T17:36:00Z", contracts=1, budget=None)
     assert main(["--series", "KXNFLGAME", "--db", str(db_path)]) == 1
 
 
 def test_report_json_roundtrip_has_strings_for_money(db_path):
     with MarketStore(db_path) as store:
-        report = run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="x", contracts=10, budget=None)
+        report = run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="2026-11-08T17:36:00Z", contracts=10, budget=None)
     data = json.loads(report_to_json(report))
     side = data["events"][0]["sides"][0]
     assert side["evaluation"]["fee_total"] == "0.18"  # ATL YES at 0.56 x 10: 0.07*10*0.2464 = 0.17248 -> $0.18
@@ -181,9 +186,33 @@ def test_empty_capture_supersedes_older_odds(db_path, capsys):
     """Codex review: a successful run with no lines must not leave compare on stale odds."""
     with MarketStore(db_path) as store:
         store.save_odds(OddsCapture(SOURCE, "americanfootball_nfl", "2026-11-08T17:40:00Z", "us,eu", 0, 0), [])
-        report = run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="x", contracts=1, budget=None)
+        report = run(series_ticker="KXNFLGAME", store=store, table=TABLE, now="2026-11-08T17:41:00Z", contracts=1, budget=None)
     assert report.odds_captured_at == "2026-11-08T17:40:00Z"
     assert report.odds_rows == 0
     assert report.events == [] and report.unmatched == []
     assert main(["--series", "KXNFLGAME", "--db", str(db_path)]) == 0
     assert "newest sportsbook capture has no moneylines" in capsys.readouterr().out
+
+
+def test_in_play_games_are_listed_not_priced_unless_asked(db_path, capsys):
+    """Live book lines lag Kalshi's live market by a changing amount; a gap there is latency."""
+    during_cinatl = "2026-11-08T18:30:00Z"  # CIN@ATL kicked off at 18:00Z; LAC@BAL is 8 days out
+    with MarketStore(db_path) as store:
+        report = run(series_ticker="KXNFLGAME", store=store, table=TABLE, now=during_cinatl, contracts=1, budget=None)
+        assert [e.event_ticker for e in report.events] == ["KXNFLGAME-26NOV16LACBAL"]
+        assert report.live_skipped == [("KXNFLGAME-26NOV08CINATL", "2026-11-08T18:00:00Z")]
+        assert report.feed_window == ("2026-11-08T18:00:00Z", "2026-11-17T01:15:00Z")
+        live = run(
+            series_ticker="KXNFLGAME", store=store, table=TABLE, now=during_cinatl,
+            contracts=1, budget=None, include_live=True,
+        )
+    assert [(e.event_ticker, e.in_play) for e in live.events] == [
+        ("KXNFLGAME-26NOV08CINATL", True),
+        ("KXNFLGAME-26NOV16LACBAL", False),
+    ]
+    assert live.live_skipped == []
+    text = format_report(live)
+    assert "KXNFLGAME-26NOV08CINATL" in text and "IN PLAY" in text
+    text = format_report(report)
+    assert "in play, not priced (1;" in text
+    assert "the odds feed covered kickoffs from 2026-11-08T18:00:00Z to 2026-11-17T01:15:00Z" in text
