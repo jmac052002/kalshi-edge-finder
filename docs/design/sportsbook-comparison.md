@@ -16,7 +16,7 @@ Date: 2026-11-08.
 | Vig removal | Power method by default, multiplicative kept as an option and shown side by side | Multiplicative normalization overstates long-shot probabilities; the power method corrects for that, which matters because long shots are what joseph bets |
 | Kalshi price used for EV | `yes_ask` (or `no_ask`) at the time of comparison, never the midpoint or `last_price` | You cannot buy at the midpoint. EV computed on a price you cannot get is fiction |
 | Fee model | Kalshi's quadratic formula with per-series `fee_type` and `fee_multiplier` read from `GET /series/{ticker}` and cached in the DB; the 0.07 default is a fallback, not the truth | Kalshi changes the schedule (latest effective 2026-07-07). Hard-coding it is how the tool silently lies six months from now |
-| Matching Kalshi to a sportsbook game | Deterministic: parse the event ticker (`KXNFLGAME-26NOV08CINATL`) for date and team codes, map codes through a checked-in alias table, require exactly one candidate within a kickoff window | No fuzzy string matching; an ambiguous match is reported as unmatched instead of guessed |
+| Matching Kalshi to a sportsbook game | Deterministic: parse the event ticker (`KXNFLGAME-26NOV08CINATL`) for the game date and team codes, map codes through a checked-in alias table, require exactly one candidate whose kickoff falls on that date (US Eastern) | No fuzzy string matching; an ambiguous match is reported as unmatched instead of guessed |
 | API key handling | One environment variable, `ODDS_API_KEY`, loaded at the CLI boundary; URL redaction in logs and exceptions; no key for Kalshi at all | The Odds API puts the key in the query string, so every log line that prints a URL is a leak unless redacted |
 | Money arithmetic | `decimal.Decimal` for prices, fees and payouts; `float` only for probabilities | Fees round up to the cent. `0.07 * 0.45 * 0.55` in binary floating point is not what Kalshi's ledger computes |
 | Parlay/combo stance | Report the EV of a combo honestly and show how the hold compounds per leg. Never rank or recommend combos | At $10 on a typical three-leg parlay the expected loss is on the order of $1 to $1.50. The tool should make that visible, not hide it behind a "best bets" list |
@@ -114,7 +114,7 @@ CREATE TABLE line_matches (
     source         TEXT NOT NULL,
     event_id       TEXT NOT NULL,
     method         TEXT NOT NULL,         -- 'ticker_codes_v1'
-    kickoff_delta_s INTEGER,              -- odds commence_time minus Kalshi close_time
+    kickoff_delta_s INTEGER,              -- odds commence_time minus the ticker date at 00:00 US Eastern
     matched_at     TEXT NOT NULL,
     PRIMARY KEY (event_ticker, source)
 );
@@ -137,11 +137,18 @@ Why raw strings for prices: it mirrors the existing `*_dollars` columns. The par
 Observed in the collector's fixtures:
 
 ```
-event_ticker:  KXNFLGAME-26NOV08CINATL
+event_ticker:  KXNFLGAME-26NOV08CINATL      (finalized market)
 market ticker: KXNFLGAME-26NOV08CINATL-CIN
 yes_sub_title: "Cincinnati"
 close_time:    2026-11-08T17:35:30Z
+
+event_ticker:  KXNFLGAME-26NOV16LACBAL      (open market)
+market ticker: KXNFLGAME-26NOV16LACBAL-LAC
+yes_sub_title: "Los Angeles C"
+close_time:    2026-11-19T01:15:00Z
 ```
+
+Note the second one: the game is on November 16, but the open market's scheduled `close_time` is three days later. Kalshi moves `close_time` to the actual result once the market finalizes, which is why the first example lines up and the second does not. `close_time` on an open market is therefore not a kickoff proxy and must not be used for matching. The ticker date is the only pre-game timestamp the collector stores today.
 
 The event ticker suffix is `YYMMMDD` plus two three-letter team codes. The market ticker's final segment names the team that contract pays on. `yes_sub_title` is truncated by Kalshi ("Los Angeles C" for the Chargers), so it is for display only and is never a match key.
 
@@ -156,7 +163,7 @@ for each open Kalshi event (grouped by event_ticker, series in scope):
     candidates = odds events where
         sport_key matches the series' configured sport
         and {home_team, away_team} == teams
-        and |commence_time - kalshi close_time| <= window (default 6 h)
+        and local_date(commence_time, "America/New_York") == date      # from the ticker
     if len(candidates) == 1: record match
     elif len(candidates) == 0: report unmatched
     else: report ambiguous, do not pick
@@ -170,7 +177,11 @@ The alias table is a checked-in JSON file, `config/teams/nfl.json`, mapping Kals
 
 Thirty-two entries, reviewed by a human once, covered by a test that asserts every code is three uppercase letters and every name is unique. A relocation or rename is a one-line PR, which is better than a fuzzy matcher that quietly pairs "LA" with the Rams.
 
-Why a time window at all when the pair of teams is already unique: two teams can meet twice in a season, and the odds feed can carry next week's game alongside this week's. The window is the tiebreak. The `26AUG29CHITEN` fixture has a preseason game whose date may be the local date rather than the UTC close date, so the window is measured against Kalshi's `close_time`, not against the date string in the ticker.
+Why a date check at all when the pair of teams is already unique: two teams can meet twice in a season, and the odds feed can carry next week's game alongside this week's. The date is the tiebreak.
+
+Why the ticker date is compared in US Eastern time and not UTC: a Sunday or Monday night NFL kickoff at 8:15 pm Eastern is 01:15Z the next day. The Odds API's `commence_time` is UTC, so comparing it to the ticker date as a UTC date would miss every prime-time game. The assumption that Kalshi names tickers by the Eastern game date is the one unverified input here; the implementation should assert it against a live payload for a night game, and the test suite should include the `KXNFLGAME-26NOV16LACBAL` fixture (Nov 16 ticker, Nov 19 close) to lock in that `close_time` is never consulted. If the date-only rule ever proves too strict, widen it to ±1 day rather than fall back to `close_time`.
+
+A better long-term source is a real game-start timestamp. Kalshi's market payload may carry one (the collector stores `expected_expiration_time` as `expiration_value`, which for `KXNFLGAME` is the word `winner`, so that field is not it); if a reliable kickoff field exists it should replace the ticker date and be stored in `markets`.
 
 ### 5.3 Side alignment
 
@@ -331,7 +342,7 @@ All offline, fixtures only, as with the collector.
 - `fees.py`: the spot checks in 6.2, both sides of a cent boundary, count rounding (10 × 0.45 = $0.18 not $0.20), `fee_type` with maker multiplier 0 returning $0.00, `Decimal` inputs only (a `float` argument raises `TypeError`).
 - `odds_math.py`: two-way and three-way de-vig sums to 1 within 1e-12; power method `k > 1` whenever `V > 1`; multiplicative and power agree when `V == 1`; EV sign flips exactly at break-even; combo of one leg equals the single-leg result.
 - `teams.py`: regex rejects malformed tickers; alias table has 32 unique names; unknown code raises a typed error.
-- `match.py`: one candidate matches; two candidates (same teams, two weeks apart) resolve by window; zero candidates reported; swapped home/away still matches.
+- `match.py`: one candidate matches; two candidates (same teams, two weeks apart) resolve by ticker date; a 01:15Z kickoff matches the previous day's ticker date; the `KXNFLGAME-26NOV16LACBAL` fixture (close three days after kickoff) matches a Nov 16 game without consulting `close_time`; zero candidates reported; swapped home/away still matches.
 - `client.py`: fake session; credit headers parsed; refuses to call below the floor; key absent from exception text and logs.
 - `compare`: an end-to-end fixture DB with two Kalshi snapshots and one odds capture, asserting the printed table.
 
@@ -347,6 +358,7 @@ Each PR updates the README roadmap so it stays accurate about what is and is not
 
 ## 11. Open questions and risks
 
+- **Ticker date timezone.** Assumed to be the US Eastern game date. Verify on a night game before relying on it.
 - **Ticker home/away order.** Unknown; the matcher is order-agnostic so it does not matter for matching, but the display should not label a side "home" until confirmed from a live payload.
 - **Fee schedule drift.** Mitigated by reading `fee_type`/`fee_multiplier` per series and dating the constants. Still worth a test that fails loudly if the API returns a `fee_type` the code does not know.
 - **Kalshi API unreachable from the cloud environment.** Observed in this project's cloud threads. Live runs for README output will need to happen on joseph's machine, same as PR #1.
