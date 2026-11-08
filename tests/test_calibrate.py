@@ -28,7 +28,11 @@ from kalshi_edge.store import MarketStore
 
 FIXTURES = Path(__file__).with_name("fixtures")
 CANDLES = json.loads((FIXTURES / "candlesticks.json").read_text())["candlesticks"]
-KICKOFF = "2026-11-08T18:00:00Z"
+CINATL = json.loads((FIXTURES / "candlesticks_cinatl.json").read_text())["candlesticks"]
+# Kalshi's occurrence_datetime is the scheduled END of the game. With the
+# default --event-hours 4 the cutoff lands at 18:00Z, which the fixture
+# candles are arranged around.
+EVENT_END = "2026-11-08T22:00:00Z"
 KICKOFF_TS = int(datetime(2026, 11, 8, 18, tzinfo=timezone.utc).timestamp())
 NOW = "2026-11-09T12:00:00Z"
 
@@ -41,9 +45,9 @@ def _settled(ticker, event, result, **overrides):
         "result": result,
         "settlement_value_dollars": "1.0000" if result == "yes" else "0.0000",
         "last_price_dollars": "0.9900" if result == "yes" else "0.0100",
-        "occurrence_datetime": KICKOFF,
-        "expected_expiration_time": "2026-11-08T22:00:00Z",
-        "close_time": "2026-11-08T22:00:00Z",
+        "occurrence_datetime": EVENT_END,
+        "expected_expiration_time": EVENT_END,
+        "close_time": "2026-11-08T22:05:30Z",
     }
     payload.update(overrides)
     return parse_market(payload, series_ticker="KXNFLGAME", source="historical", fetched_at=NOW)
@@ -81,6 +85,7 @@ def store(tmp_path):
 
 
 def test_parse_timestamp_handles_api_formats():
+    KICKOFF = "2026-11-08T18:00:00Z"
     assert parse_timestamp(KICKOFF) == KICKOFF_TS
     assert parse_timestamp("2026-11-08T18:00:00.123456Z") == KICKOFF_TS
     assert parse_timestamp("2026-11-08T13:00:00-05:00") == KICKOFF_TS
@@ -89,16 +94,16 @@ def test_parse_timestamp_handles_api_formats():
     assert parse_timestamp("yesterday") is None
 
 
-def test_cutoff_prefers_event_start_then_falls_back():
+def test_cutoff_treats_every_timestamp_as_the_event_end():
     market = {
-        "occurrence_datetime": KICKOFF,
-        "expected_expiration_time": "2026-11-08T22:00:00Z",
+        "occurrence_datetime": EVENT_END,
+        "expected_expiration_time": "2026-11-09T01:00:00Z",
         "close_time": "2026-11-08T23:00:00Z",
     }
     assert event_cutoff(market, event_hours=4) == (KICKOFF_TS, "occurrence_datetime")
 
     market["occurrence_datetime"] = None
-    assert event_cutoff(market, event_hours=4) == (KICKOFF_TS, "expected_expiration_time")
+    assert event_cutoff(market, event_hours=7) == (KICKOFF_TS, "expected_expiration_time")
 
     market["expected_expiration_time"] = ""
     assert event_cutoff(market, event_hours=5) == (KICKOFF_TS, "close_time")
@@ -107,11 +112,57 @@ def test_cutoff_prefers_event_start_then_falls_back():
     assert event_cutoff(market, event_hours=4) is None
 
 
+def test_event_hours_zero_takes_the_timestamp_as_is():
+    market = {
+        "occurrence_datetime": "2026-11-08T18:00:00Z",
+        "expected_expiration_time": None,
+        "close_time": None,
+    }
+    assert event_cutoff(market, event_hours=0) == (KICKOFF_TS, "occurrence_datetime")
+
+
+def test_cutoff_uses_the_earlier_of_occurrence_and_expiration():
+    # KXNFLGAME-26OCT11PHIJAC: the game ran long, occurrence_datetime was
+    # rewritten to the final whistle, expected_expiration_time kept the schedule.
+    market = {
+        "occurrence_datetime": "2026-10-11T17:13:07Z",
+        "expected_expiration_time": "2026-10-11T16:30:00Z",
+        "close_time": "2026-10-11T17:16:07Z",
+    }
+    cutoff, source = event_cutoff(market, event_hours=4)
+    assert source == "expected_expiration_time"
+    assert cutoff == parse_timestamp("2026-10-11T12:30:00Z")
+
+
 def test_lead_hours_moves_cutoff_earlier():
-    market = {"occurrence_datetime": KICKOFF, "expected_expiration_time": None, "close_time": None}
+    market = {"occurrence_datetime": EVENT_END, "expected_expiration_time": None, "close_time": None}
     assert event_cutoff(market, event_hours=4, lead_hours=1.5) == (KICKOFF_TS - 5400, "occurrence_datetime")
     with pytest.raises(ValueError):
         event_cutoff(market, event_hours=-1)
+
+
+def test_default_cutoff_does_not_read_in_game_prices():
+    """Regression for the first live run: occurrence_datetime is the game's end.
+
+    Real hourly closes of KXNFLGAME-26NOV08CINATL-CIN: 0.62 before kickoff
+    (14:30Z), 0.93 and 0.98 while the game was being decided, and
+    occurrence_datetime 17:30Z. Reading the last bar before that timestamp
+    gave a Brier of 0.11 across the series; no pre-game market does that.
+    """
+    market = {
+        "occurrence_datetime": "2026-11-08T17:30:00Z",
+        "expected_expiration_time": "2026-11-08T17:30:00Z",
+        "close_time": "2026-11-08T17:35:30Z",
+    }
+    candles = parse_candles(CINATL)
+    cutoff_ts, _ = event_cutoff(market, event_hours=4)
+    chosen = pick_pre_event_candle(candles, cutoff_ts)
+    assert chosen is not None and chosen.last_price == 0.62
+    assert datetime.fromtimestamp(chosen.end_ts, timezone.utc).hour == 13
+
+    # The bug, kept as a demonstration: event_hours 0 reads the 17:00Z bar.
+    unshifted, _ = event_cutoff(market, event_hours=0)
+    assert pick_pre_event_candle(candles, unshifted).last_price == 0.98
 
 
 # --- candle selection -------------------------------------------------------

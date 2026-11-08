@@ -77,12 +77,12 @@ class ParsedMarket:
     a fraction on a scalar market). That payoff, not the post-game last
     trade, is what a calibration study compares to the earlier price.
 
-    ``occurrence_datetime`` is the scheduled time of the underlying event
-    (kickoff, for a game) when Kalshi publishes one, and
-    ``expected_expiration_time`` is when the exchange expects to settle.
-    The calibration backtest uses them to decide what "before the event"
-    means for each contract. ``close_time`` alone is not enough: sports
-    markets trade through the game, so the book closes after kickoff.
+    ``occurrence_datetime`` and ``expected_expiration_time`` are the
+    exchange's timing fields for the underlying event. Despite the name,
+    on NFL game markets ``occurrence_datetime`` is the scheduled end of the
+    game, not kickoff. The calibration backtest stores them so it can work
+    out what "before the event" means for each contract; see
+    ``calibrate.event_cutoff`` for how.
 
     ``yes_bid`` / ``yes_ask`` / ``last_price`` are the latest quotes on this
     fetch. On a finalized market the last trade is usually near 0 or 1

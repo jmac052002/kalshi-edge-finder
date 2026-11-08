@@ -12,7 +12,7 @@ Steps, each a function below so it can be tested on its own:
    ``collect --mode settled`` first).
 2. For each one, decide the **pre-event cutoff**: the instant the outcome
    started to be revealed. Quotes after that are not forecasts. See
-   :func:`event_cutoff` for which market fields are trusted and in what order.
+   :func:`event_cutoff` for why no Kalshi timestamp is taken at face value.
 3. Fetch the hourly candlesticks ending at or before the cutoff, take the
    last candle with a two-sided book, and cache its closing bid and ask in
    ``pre_event_prices``. The second run of the backtest is free.
@@ -123,33 +123,48 @@ def event_cutoff(
 ) -> tuple[int, str] | None:
     """The Unix second after which quotes on this market are not forecasts.
 
-    Preferred, in order:
+    None of the timestamps Kalshi publishes is the start of the event. On
+    ``KXNFLGAME`` (checked against the live API on 2026-11-08):
 
-    * ``occurrence_datetime`` — the scheduled start of the underlying event
-      (kickoff). Kalshi publishes it for scheduled events. This is the
-      honest cutoff.
-    * ``expected_expiration_time`` minus ``event_hours`` — when the
-      exchange expected to settle, pushed back by the length of the event.
-      Sports markets trade in-play, so the expiration is after the game
-      ends; ``event_hours`` has to cover the whole game plus the settlement
-      lag or the "pre-event" quote is really a half-time quote.
-    * ``close_time`` minus ``event_hours`` — same idea, last resort.
+    * ``occurrence_datetime`` is the scheduled *end* of the game, kickoff
+      plus three hours. The name suggests kickoff; the hourly candles say
+      otherwise: a contract quoted at 0.62 before kickoff was 0.98 in the
+      bar that ended just before its ``occurrence_datetime``.
+    * ``expected_expiration_time`` is the same instant, or three hours
+      later on early-season rows. When a game ran long Kalshi rewrote
+      ``occurrence_datetime`` to the actual final whistle and left the
+      expiration at the scheduled one, so the earlier of the two is the
+      scheduled end.
+    * ``close_time`` is when the book actually closed, minutes after that.
 
-    ``lead_hours`` moves every cutoff earlier, for a "what did the market
-    say the morning of" style question. The source name is returned with the
-    timestamp so the report can say how many contracts used the fallbacks.
+    So every source is treated as the end of the event and pushed back by
+    ``event_hours`` (default 4, which lands an hour before an NFL kickoff).
+    The earlier of ``occurrence_datetime`` and ``expected_expiration_time``
+    is used, then ``close_time`` as a last resort, and the field's name is
+    returned so the report can say which one each contract used. A series
+    whose ``occurrence_datetime`` really is the start can run with
+    ``--event-hours 0``. ``lead_hours`` moves every cutoff earlier again
+    for a "what did the market say that morning" question.
+
+    The first version of this function trusted ``occurrence_datetime`` as
+    kickoff and used it unshifted. That run scored a Brier of 0.11 on NFL
+    games, which no pre-game market achieves; the quotes were in-game.
     """
     if event_hours < 0 or lead_hours < 0:
         raise ValueError("event_hours and lead_hours must be >= 0")
-    lead = int(lead_hours * 3600)
-    event_length = int(event_hours * 3600)
-    occurrence = parse_timestamp(market["occurrence_datetime"])
-    if occurrence is not None:
-        return occurrence - lead, "occurrence_datetime"
-    for key in ("expected_expiration_time", "close_time"):
-        stamp = parse_timestamp(market[key])
-        if stamp is not None:
-            return stamp - event_length - lead, key
+    shift = int(event_hours * 3600) + int(lead_hours * 3600)
+    scheduled = [
+        (stamp, key)
+        for key in ("occurrence_datetime", "expected_expiration_time")
+        if (stamp := parse_timestamp(market[key])) is not None
+    ]
+    if scheduled:
+        # On a tie the first listed field wins, so the source stays stable.
+        stamp, key = min(scheduled, key=lambda item: item[0])
+        return stamp - shift, key
+    close = parse_timestamp(market["close_time"])
+    if close is not None:
+        return close - shift, "close_time"
     return None
 
 
@@ -555,15 +570,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=4.0,
         help=(
-            "Fallback when Kalshi gives no event start time: treat this many hours before the "
-            "expected expiration (or close) as the cutoff (default: 4)."
+            "Hours between the event's start and the timestamp Kalshi publishes "
+            "(occurrence_datetime is the scheduled end of an NFL game, not kickoff). "
+            "The cutoff is that timestamp minus this (default: 4)."
         ),
     )
     parser.add_argument(
         "--lead-hours",
         type=float,
         default=0.0,
-        help="Move the cutoff this many hours earlier than the event start (default: 0).",
+        help="Move the cutoff this many hours earlier still (default: 0).",
     )
     parser.add_argument("--refresh", action="store_true", help="Discard cached pre-event quotes and refetch.")
     parser.add_argument(
