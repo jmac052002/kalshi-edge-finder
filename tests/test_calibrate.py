@@ -1,6 +1,7 @@
 """Calibration backtest tests. Candlesticks come from a fixture; no network."""
 
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 from kalshi_edge.calibrate import (
     Observation,
+    Report,
     brier_score,
     bucket_edges,
     bucket_observations,
@@ -21,6 +23,8 @@ from kalshi_edge.calibrate import (
     report_to_json,
     run,
     side_roi,
+    wilson_interval,
+    write_reliability_diagram,
 )
 from kalshi_edge.client import KalshiAPIError
 from kalshi_edge.parse import parse_candles, parse_market
@@ -383,6 +387,24 @@ def test_side_roi_includes_taker_fee():
     assert side_roi([], 1) is None
 
 
+def test_wilson_interval():
+    assert wilson_interval(0, 0) is None
+    # 50 of 100: the normal approximation gives 40.2%..59.8%; Wilson is close.
+    low, high = wilson_interval(50, 100)
+    assert low == pytest.approx(0.4038, abs=1e-3) and high == pytest.approx(0.5962, abs=1e-3)
+    # Two of two: a naive interval would be 100%..100%.
+    low, high = wilson_interval(2, 2)
+    assert low == pytest.approx(0.342, abs=1e-3) and high == 1.0
+    low, high = wilson_interval(0, 2)
+    assert low == 0.0 and high == pytest.approx(0.658, abs=1e-3)
+    # All-YES and all-NO buckets must hit the bounds exactly, not a few ulps
+    # off, or the plot's error-bar lengths go negative (Codex finding on #7).
+    assert wilson_interval(6, 6)[1] == 1.0
+    assert wilson_interval(0, 11)[0] == 0.0
+    with pytest.raises(ValueError):
+        wilson_interval(3, 2)
+
+
 def test_bucket_edges_and_assignment():
     assert bucket_edges(4) == [0.0, 0.25, 0.5, 0.75, 1.0]
     with pytest.raises(ValueError):
@@ -397,7 +419,10 @@ def test_bucket_edges_and_assignment():
     assert [b.count for b in buckets] == [1, 2, 0, 1]
     assert buckets[1].predicted == pytest.approx(0.255)
     assert buckets[1].actual == pytest.approx(0.5)
+    assert buckets[1].actual_low == pytest.approx(0.0945, abs=1e-3)
+    assert buckets[1].actual_high == pytest.approx(0.9055, abs=1e-3)
     assert buckets[2].predicted is None and buckets[2].yes_roi is None
+    assert buckets[2].actual_low is None and buckets[2].actual_high is None
     assert buckets[3].actual == 1.0
     with pytest.raises(ValueError):
         bucket_observations(observations, [0.5, 0.5])
@@ -437,6 +462,7 @@ def test_run_produces_report(store):
     assert "series=KXNFLGAME" in text
     assert "40-50%" in text and "occurrence_datetime=2" in text
     assert "brier=" in text and "one contract per event" in text
+    assert "95% CI" in text and "9.5%..90.5%" in text
     parsed = json.loads(report_to_json(report))
     assert parsed["observations"] == 2 and len(parsed["buckets"]) == 10
 
@@ -469,3 +495,46 @@ def test_main_end_to_end_with_fake_client(tmp_path, capsys, monkeypatch):
     assert main(["--series", "kxnflgame", "--db", str(db), "--json", str(out)]) == 0
     assert "observations=2" in capsys.readouterr().out
     assert json.loads(out.read_text())["series"] == "KXNFLGAME"
+
+
+def test_reliability_diagram_writes_png(store, tmp_path):
+    pytest.importorskip("matplotlib")
+    client = FakeClient(_fixture_db(store))
+    report = run(series_ticker="KXNFLGAME", client=client, store=store, now=NOW)
+    out = tmp_path / "calibration.png"
+    write_reliability_diagram(report, out)
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_reliability_diagram_handles_all_yes_and_all_no_buckets(tmp_path):
+    pytest.importorskip("matplotlib")
+    observations = [_obs(0.85, 1.0, ticker=f"y{i}") for i in range(6)]
+    observations += [_obs(0.15, 0.0, ticker=f"n{i}") for i in range(11)]
+    buckets = bucket_observations(observations, bucket_edges(10))
+    report = Report(
+        series="KXNFLGAME",
+        settled=17,
+        with_quote=17,
+        observations=17,
+        one_per_event=True,
+        contracts=1,
+        cutoff_sources={},
+        skipped={},
+        fetched=0,
+        cached=17,
+        buckets=buckets,
+        brier=0.1,
+        base_rate=6 / 17,
+        base_rate_brier=0.2,
+    )
+    out = tmp_path / "edges.png"
+    write_reliability_diagram(report, out)
+    assert out.exists()
+
+
+def test_plot_without_matplotlib_is_a_clear_error(store, tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "matplotlib", None)  # makes `import matplotlib` raise ImportError
+    client = FakeClient(_fixture_db(store))
+    report = run(series_ticker="KXNFLGAME", client=client, store=store, now=NOW)
+    with pytest.raises(RuntimeError, match="requirements-plot.txt"):
+        write_reliability_diagram(report, tmp_path / "calibration.png")
