@@ -202,8 +202,9 @@ def fetch_pre_event_prices(
     earlier-time backtest it never performed. Each market that is not
     served from the cache costs one request. Results are committed one row
     at a time so an interrupted run keeps its progress. A market the
-    exchange answers 404 for (archived contracts can lack candlesticks) is
-    cached as a miss rather than retried forever.
+    exchange answers 404 for (markets archived past Kalshi's historical
+    cutoff have no candlesticks at all) is cached as missing history and
+    never asked for again, whatever window a later run uses.
     """
     if lookback_hours <= 0:
         raise ValueError("lookback_hours must be > 0")
@@ -248,9 +249,12 @@ def fetch_pre_event_prices(
             logger.warning("%s: no candlestick history (404)", ticker)
             stats.not_found += 1
             raw = []
+            history_missing = True
+        else:
+            history_missing = False
         stats.fetched += 1
         candle = pick_pre_event_candle(parse_candles(raw), cutoff_ts)
-        if candle is None:
+        if candle is None and not history_missing:
             stats.no_candle += 1
         price = PreEventPrice(
             ticker=ticker,
@@ -263,6 +267,7 @@ def fetch_pre_event_prices(
             yes_ask=None if candle is None else candle.yes_ask,
             last_price=None if candle is None else candle.last_price,
             fetched_at=now,
+            history_missing=history_missing,
         )
         store.save_pre_event_price(price)
         cached[ticker] = price

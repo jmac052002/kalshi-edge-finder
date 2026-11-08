@@ -148,6 +148,7 @@ def test_fetch_caches_quotes_and_misses(store):
         markets=store.settled_markets("KXNFLGAME"), now=NOW, lookback_hours=72,
     )
     assert stats.fetched == 2 and stats.cached == 0 and stats.no_candle == 1
+    assert stats.not_found == 0 and not prices[atl.ticker].history_missing
     assert prices[cin.ticker].yes_ask == 0.46
     assert prices[cin.ticker].cutoff_source == "occurrence_datetime"
     assert prices[atl.ticker].yes_bid is None and prices[atl.ticker].candle_end_ts is None
@@ -240,6 +241,16 @@ def test_fetch_404_is_cached_and_other_errors_propagate(store):
     cached = store.pre_event_prices("KXNFLGAME")
     assert list(cached) == [missing.ticker]
     assert cached[missing.ticker].candle_end_ts is None
+    assert cached[missing.ticker].history_missing
+
+    # Missing history is window-independent: a different lead does not re-ask.
+    client.by_ticker[broken.ticker] = CANDLES
+    _, stats = fetch_pre_event_prices(
+        store=store, client=client, series_ticker="KXNFLGAME",
+        markets=store.settled_markets("KXNFLGAME"), now=NOW, lead_hours=12,
+    )
+    assert stats.cached == 1 and stats.fetched == 1 and stats.not_found == 0
+    assert sum(1 for c in client.calls if c["ticker"] == missing.ticker) == 1
 
 
 def test_fetch_skips_markets_without_event_time_and_honours_max_fetch(store):

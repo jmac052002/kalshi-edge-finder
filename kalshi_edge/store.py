@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS pre_event_prices (
     yes_ask REAL,
     last_price REAL,
     fetched_at TEXT NOT NULL,
+    history_missing INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (ticker) REFERENCES markets (ticker)
 );
 
@@ -214,8 +215,8 @@ ON CONFLICT(ticker, captured_at) DO UPDATE SET
 _UPSERT_PRE_EVENT = """
 INSERT INTO pre_event_prices (
     ticker, series_ticker, cutoff_ts, cutoff_source, start_ts, candle_end_ts,
-    yes_bid, yes_ask, last_price, fetched_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    yes_bid, yes_ask, last_price, fetched_at, history_missing
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(ticker) DO UPDATE SET
     series_ticker = excluded.series_ticker,
     cutoff_ts = excluded.cutoff_ts,
@@ -225,7 +226,8 @@ ON CONFLICT(ticker) DO UPDATE SET
     yes_bid = excluded.yes_bid,
     yes_ask = excluded.yes_ask,
     last_price = excluded.last_price,
-    fetched_at = excluded.fetched_at
+    fetched_at = excluded.fetched_at,
+    history_missing = excluded.history_missing
 """
 
 # Columns added after schema version 1. A version-1 file gets them through
@@ -275,7 +277,7 @@ class MarketStore:
         # rebuilt by the next calibrate run rather than migrated.
         if "pre_event_prices" in tables:
             cache_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(pre_event_prices)")}
-            if "start_ts" not in cache_columns:
+            if not {"start_ts", "history_missing"} <= cache_columns:
                 self.conn.execute("DROP TABLE pre_event_prices")
 
     def close(self) -> None:
@@ -332,6 +334,7 @@ class MarketStore:
                 yes_ask=row["yes_ask"],
                 last_price=row["last_price"],
                 fetched_at=row["fetched_at"],
+                history_missing=bool(row["history_missing"]),
             )
             for row in rows
         }

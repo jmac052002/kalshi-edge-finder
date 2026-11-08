@@ -275,6 +275,7 @@ def test_pre_event_price_cache_roundtrip(store):
     store.save_pre_event_price(miss)
     cached = store.pre_event_prices("KXNFLGAME")
     assert cached == {"MKT-1": hit, "MKT-2": miss}
+    assert not cached["MKT-2"].history_missing
     assert cached["MKT-1"].midpoint == pytest.approx(0.44)
 
     # Upsert replaces; the ticker must exist in markets.
@@ -311,6 +312,10 @@ def test_pre_event_price_answers_only_its_window():
     assert miss.answers(start_ts=500, cutoff_ts=1000, cutoff_source="occurrence_datetime")
     assert miss.answers(start_ts=600, cutoff_ts=1000, cutoff_source="occurrence_datetime")
     assert not miss.answers(start_ts=400, cutoff_ts=1000, cutoff_source="occurrence_datetime")
+
+    gone = PreEventPrice(candle_end_ts=None, history_missing=True,
+                         **{**base, "yes_bid": None, "yes_ask": None, "last_price": None})
+    assert gone.answers(start_ts=1, cutoff_ts=5, cutoff_source="close_time")
 
 
 def test_cache_table_without_window_columns_is_rebuilt(tmp_path):

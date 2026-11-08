@@ -373,6 +373,7 @@ class PreEventPrice:
     yes_ask: float | None
     last_price: float | None
     fetched_at: str
+    history_missing: bool = False
 
     @property
     def midpoint(self) -> float | None:
@@ -383,12 +384,18 @@ class PreEventPrice:
     def answers(self, *, start_ts: int, cutoff_ts: int, cutoff_source: str) -> bool:
         """Whether this cached row is the answer for the given window.
 
-        The cutoff and its source must match exactly: a quote taken as of
-        kickoff is not the quote as of twelve hours before it. A hit is
-        still valid for a narrower window as long as the candle it found is
-        inside that window. A miss is only valid if the window it searched
-        covered the one asked for; a wider search could find something.
+        A market the exchange has no candlestick history for at all
+        (``history_missing``, a 404) answers every window: Kalshi archives
+        old markets without their bars, and asking again with a different
+        cutoff gets the same 404. Otherwise the cutoff and its source must
+        match exactly: a quote taken as of kickoff is not the quote as of
+        twelve hours before it. A hit is still valid for a narrower window
+        as long as the candle it found is inside that window. A miss is
+        only valid if the window it searched covered the one asked for; a
+        wider search could find something.
         """
+        if self.history_missing:
+            return True
         if cutoff_ts != self.cutoff_ts or cutoff_source != self.cutoff_source:
             return False
         if self.candle_end_ts is not None:
@@ -407,4 +414,5 @@ class PreEventPrice:
             self.yes_ask,
             self.last_price,
             self.fetched_at,
+            int(self.history_missing),
         )
