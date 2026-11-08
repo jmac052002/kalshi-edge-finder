@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Kalshi database. This is collected research data, not source.
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
