@@ -12,7 +12,9 @@ from kalshi_edge.sportsbook.client import (
     redact,
 )
 
-KEY = "sk-test-0123456789abcdef"
+# Deliberately low-entropy so the gitleaks scan in CI does not flag the fixture
+# as a credential, and long enough for redact() to substitute it literally.
+KEY = "not-a-real-key-aaaaaaaaaaaaaaaaaaaa"
 
 
 class FakeResponse:

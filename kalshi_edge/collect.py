@@ -40,7 +40,7 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kalshi_edge.client import DEFAULT_BASE_URL, KalshiAPIError, KalshiClient
@@ -68,7 +68,7 @@ class RunStats:
 
 def utc_now() -> str:
     """UTC timestamp at one-second resolution, used as the snapshot key."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalize_series(items: Sequence[str]) -> list[str]:

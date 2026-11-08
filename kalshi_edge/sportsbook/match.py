@@ -20,7 +20,7 @@ the 19th), so it is not a kickoff proxy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo
 
 from kalshi_edge.sportsbook.teams import TeamTable, TickerParseError, parse_event_ticker
@@ -85,8 +85,8 @@ def parse_iso_utc(text: str) -> datetime:
         cleaned = cleaned[:-1] + "+00:00"
     parsed = datetime.fromisoformat(cleaned)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def match_events(

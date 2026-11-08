@@ -65,16 +65,16 @@ def test_main_reads_key_from_env_and_passes_floor(tmp_path, monkeypatch, capsys)
         created.append(client)
         return client
 
-    monkeypatch.setenv(ENV_VAR, "sk-test-0123456789abcdef")
+    monkeypatch.setenv(ENV_VAR, "not-a-real-key-aaaaaaaaaaaaaaaaaaaa")
     monkeypatch.setattr("kalshi_edge.odds.OddsApiClient", factory)
     code = main(["--db", str(tmp_path / "k.db"), "--min-remaining", "75", "--regions", "us"])
     out = capsys.readouterr().out
     assert code == 0
-    assert created[0].api_key == "sk-test-0123456789abcdef"
+    assert created[0].api_key == "not-a-real-key-aaaaaaaaaaaaaaaaaaaa"
     assert created[0].kwargs["min_remaining"] == 75
     assert created[0].closed
     assert "remaining=478" in out
-    assert "sk-test" not in out
+    assert "not-a-real-key" not in out
 
 
 def test_main_reports_credit_floor_as_failure(tmp_path, monkeypatch):
@@ -82,7 +82,7 @@ def test_main_reports_credit_floor_as_failure(tmp_path, monkeypatch):
         def get_odds(self, *args, **kwargs):
             raise CreditFloorError("12 credits remaining is below the floor of 50")
 
-    monkeypatch.setenv(ENV_VAR, "sk-test-0123456789abcdef")
+    monkeypatch.setenv(ENV_VAR, "not-a-real-key-aaaaaaaaaaaaaaaaaaaa")
     monkeypatch.setattr("kalshi_edge.odds.OddsApiClient", lambda key, **kw: Floor(key, **kw))
     assert main(["--db", str(tmp_path / "k.db")]) == 1
     with MarketStore(tmp_path / "k.db") as store:

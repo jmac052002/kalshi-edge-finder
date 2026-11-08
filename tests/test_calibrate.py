@@ -1,7 +1,7 @@
 """Calibration backtest tests. Candlesticks come from a fixture; no network."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -33,7 +33,7 @@ CINATL = json.loads((FIXTURES / "candlesticks_cinatl.json").read_text())["candle
 # default --event-hours 4 the cutoff lands at 18:00Z, which the fixture
 # candles are arranged around.
 EVENT_END = "2026-11-08T22:00:00Z"
-KICKOFF_TS = int(datetime(2026, 11, 8, 18, tzinfo=timezone.utc).timestamp())
+KICKOFF_TS = int(datetime(2026, 11, 8, 18, tzinfo=UTC).timestamp())
 NOW = "2026-11-09T12:00:00Z"
 
 
@@ -158,7 +158,7 @@ def test_default_cutoff_does_not_read_in_game_prices():
     cutoff_ts, _ = event_cutoff(market, event_hours=4)
     chosen = pick_pre_event_candle(candles, cutoff_ts)
     assert chosen is not None and chosen.last_price == 0.62
-    assert datetime.fromtimestamp(chosen.end_ts, timezone.utc).hour == 13
+    assert datetime.fromtimestamp(chosen.end_ts, UTC).hour == 13
 
     # The bug, kept as a demonstration: event_hours 0 reads the 17:00Z bar.
     unshifted, _ = event_cutoff(market, event_hours=0)
