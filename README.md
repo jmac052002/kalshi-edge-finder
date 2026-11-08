@@ -308,6 +308,8 @@ SQLite, schema version 3 in `schema_meta`. Older files are upgraded in place on 
 
 `pre_event_prices` — one row per ticker: `cutoff_ts` (Unix second treated as the event start), `cutoff_source` (which market field it came from), `candle_end_ts` and the closing `yes_bid` / `yes_ask` / `last_price` of the chosen bar. A market with no two-sided bar before the cutoff is stored with those `NULL` so the miss is remembered.
 
+`odds_captures` — one row per `odds` run (sport, regions, event and row counts), written even when the provider returned nothing. The newest row here defines the latest capture, so an empty run supersedes older odds instead of leaving `compare` on stale lines.
+
 `sportsbook_odds` — one row per bookmaker outcome per capture, primary key `(source, event_id, bookmaker, market, outcome, captured_at)`. `price_decimal` is the decimal-odds text exactly as the provider sent it; nothing is de-vigged on the way in, so the method can change without re-collecting. `captured_at` is our run time, `book_updated` the bookmaker's own `last_update`.
 
 `series_fees` — `fee_type` and `fee_multiplier` per series from `GET /series/{ticker}`, refreshed by every `collect` run.
