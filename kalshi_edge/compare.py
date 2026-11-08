@@ -102,6 +102,7 @@ class EventReport:
     reference: str
     reference_updated: str | None
     books: int
+    in_play: bool
     sides: list[SideReport]
     skipped: list[str]
 
@@ -122,8 +123,11 @@ class Report:
     max_gap_minutes: float
     fee_source: str
     open_contracts: int
+    include_live: bool
+    feed_window: tuple[str, str] | None
     events: list[EventReport] = field(default_factory=list)
     unmatched: list[Unmatched] = field(default_factory=list)
+    live_skipped: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def stale(self) -> bool:
@@ -240,6 +244,7 @@ def build_event_report(
     fee: SeriesFee | None,
     fixed_contracts: int | None,
     budget: Decimal | None,
+    in_play: bool,
 ) -> EventReport:
     sides: list[SideReport] = []
     skipped: list[str] = []
@@ -307,6 +312,7 @@ def build_event_report(
         reference=reference_used,
         reference_updated=reference_updated,
         books=book_count,
+        in_play=in_play,
         sides=sides,
         skipped=skipped,
     )
@@ -323,7 +329,16 @@ def run(
     contracts: int | None = None,
     budget: Decimal | None = Decimal(10),
     max_gap_minutes: float = 15.0,
+    include_live: bool = False,
 ) -> Report:
+    """Build the report. ``now`` is the run time and decides which games are in play.
+
+    A game whose sportsbook kickoff is at or before ``now`` is in play. Its
+    book lines are live odds that move every snap, and Kalshi's live market
+    lags them by a different amount each minute, so a gap between the two is
+    latency, not mispricing. In-play games are listed but not priced unless
+    ``include_live`` is set.
+    """
     if (contracts is None) == (budget is None):
         raise ValueError("pass exactly one of contracts or budget")
     kalshi_at, kalshi_events = load_kalshi(store, series_ticker)
@@ -356,9 +371,12 @@ def run(
         max_gap_minutes=max_gap_minutes,
         fee_source=fee_source,
         open_contracts=sum(len(c) for c in kalshi_events.values()),
+        include_live=include_live,
+        feed_window=feed_window(sportsbook_events),
     )
     if not kalshi_events or not sportsbook_events:
         return report
+    now_ts = parse_iso_utc(now)
 
     matched = match_events(
         [KalshiEvent(ticker, frozenset(c.code for c in cs)) for ticker, cs in kalshi_events.items()],
@@ -367,6 +385,10 @@ def run(
     )
     report.unmatched = matched.unmatched
     for match in matched.matches:
+        in_play = match.event.kickoff() <= now_ts
+        if in_play and not include_live:
+            report.live_skipped.append((match.event_ticker, match.event.commence_time))
+            continue
         report.events.append(
             build_event_report(
                 match,
@@ -379,12 +401,21 @@ def run(
                 fee=fee,
                 fixed_contracts=contracts,
                 budget=budget,
+                in_play=in_play,
             )
         )
     store.save_line_matches(
         [(m.event_ticker, SOURCE, m.event.event_id, m.method, m.kickoff_delta_s, now) for m in matched.matches]
     )
     return report
+
+
+def feed_window(events: list[SportsbookEvent]) -> tuple[str, str] | None:
+    """Earliest and latest kickoff in the odds capture, to explain unmatched games."""
+    if not events:
+        return None
+    times = sorted(e.commence_time for e in events)
+    return times[0], times[-1]
 
 
 def _pp(value: float) -> str:
@@ -438,6 +469,7 @@ def format_report(report: Report) -> str:
             f"kickoff {event.kickoff}  ref={event.reference}"
             + (f" ({_short_time(event.reference_updated)})" if event.reference_updated else "")
             + f"  books={event.books}"
+            + ("  IN PLAY (live lines; gap is lag, not edge)" if event.in_play else "")
         )
         if event.sides:
             lines.append(
@@ -453,9 +485,20 @@ def format_report(report: Report) -> str:
             )
         for note in event.skipped:
             lines.append(f"  skipped {note}")
+    if report.live_skipped:
+        lines.append("")
+        lines.append(
+            f"in play, not priced ({len(report.live_skipped)}; live book lines move faster than "
+            f"Kalshi's, so any gap is lag; --include-live shows them anyway):"
+        )
+        for ticker, kickoff in report.live_skipped:
+            lines.append(f"  {ticker}  kickoff {kickoff}")
     if report.unmatched:
         lines.append("")
-        lines.append(f"unmatched ({len(report.unmatched)}):")
+        window = ""
+        if report.feed_window:
+            window = f"; the odds feed covered kickoffs from {report.feed_window[0]} to {report.feed_window[1]}"
+        lines.append(f"unmatched ({len(report.unmatched)}{window}):")
         for item in report.unmatched:
             lines.append(f"  {item.event_ticker}: {item.reason}")
     lines.append("")
@@ -533,6 +576,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=15.0,
         help="Flag the report STALE when the two captures are further apart than this (default: 15).",
     )
+    parser.add_argument(
+        "--include-live",
+        action="store_true",
+        help="Also price games that have already kicked off. Off by default: in-play lines are not comparable.",
+    )
     parser.add_argument("--json", type=Path, help="Also write the report as JSON to this path.")
     args = parser.parse_args(argv)
     if args.contracts is not None and args.contracts < 1:
@@ -572,6 +620,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contracts=args.contracts,
                 budget=None if args.contracts is not None else args.budget,
                 max_gap_minutes=args.max_gap_minutes,
+                include_live=args.include_live,
             )
     except UnknownFeeTypeError as exc:
         logger.error("%s; update kalshi_edge/fees.py before trusting any EV", exc)
