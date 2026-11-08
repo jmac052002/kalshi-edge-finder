@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Self
 
 from kalshi_edge.parse import ParsedMarket, PreEventPrice, PriceSnapshot
 
@@ -283,7 +284,7 @@ class MarketStore:
     def close(self) -> None:
         self.conn.close()
 
-    def __enter__(self) -> MarketStore:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

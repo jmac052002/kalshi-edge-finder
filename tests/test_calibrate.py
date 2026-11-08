@@ -228,7 +228,13 @@ def test_cache_is_not_reused_for_a_different_window(store):
     store.save_page([cin], [])
     client = FakeClient({cin.ticker: CANDLES})
     markets = store.settled_markets("KXNFLGAME")
-    kwargs = dict(store=store, client=client, series_ticker="KXNFLGAME", markets=markets, now=NOW)
+    kwargs = {
+        "store": store,
+        "client": client,
+        "series_ticker": "KXNFLGAME",
+        "markets": markets,
+        "now": NOW,
+    }
 
     prices, _ = fetch_pre_event_prices(**kwargs)
     assert prices[cin.ticker].candle_end_ts == KICKOFF_TS - 2 * 3600

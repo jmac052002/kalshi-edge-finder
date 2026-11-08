@@ -299,8 +299,17 @@ def test_settled_markets_query(store):
 def test_pre_event_price_answers_only_its_window():
     from kalshi_edge.parse import PreEventPrice
 
-    base = dict(ticker="T", series_ticker="S", cutoff_ts=1000, cutoff_source="occurrence_datetime",
-                start_ts=500, fetched_at="now", yes_bid=0.4, yes_ask=0.42, last_price=0.41)
+    base = {
+        "ticker": "T",
+        "series_ticker": "S",
+        "cutoff_ts": 1000,
+        "cutoff_source": "occurrence_datetime",
+        "start_ts": 500,
+        "fetched_at": "now",
+        "yes_bid": 0.4,
+        "yes_ask": 0.42,
+        "last_price": 0.41,
+    }
     hit = PreEventPrice(candle_end_ts=900, **base)
     assert hit.answers(start_ts=500, cutoff_ts=1000, cutoff_source="occurrence_datetime")
     assert hit.answers(start_ts=900, cutoff_ts=1000, cutoff_source="occurrence_datetime")

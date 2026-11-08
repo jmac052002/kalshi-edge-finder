@@ -33,7 +33,7 @@ class FakeSession:
 
 
 def _client(handler, **kwargs):
-    defaults = dict(min_interval=0, max_attempts=4, sleep=lambda _seconds: None, rng=lambda: 1.0)
+    defaults = {"min_interval": 0, "max_attempts": 4, "sleep": lambda _seconds: None, "rng": lambda: 1.0}
     defaults.update(kwargs)
     return KalshiClient(session=FakeSession(handler), **defaults)
 

@@ -48,6 +48,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from sqlite3 import Row
 
@@ -386,7 +387,7 @@ def bucket_observations(
     off the end. Empty buckets are reported with a count of zero so the
     table always has the same rows.
     """
-    if len(edges) < 2 or any(b <= a for a, b in zip(edges, edges[1:], strict=False)):
+    if len(edges) < 2 or any(b <= a for a, b in pairwise(edges)):
         raise ValueError("edges must be strictly increasing with at least two values")
     groups: list[list[Observation]] = [[] for _ in range(len(edges) - 1)]
     last = len(groups) - 1
@@ -508,8 +509,10 @@ def format_report(report: Report) -> str:
             f"base_rate_brier={_num(report.base_rate_brier)}"
         ),
         "",
-        f"{'bucket':>9}  {'n':>5}  {'predicted':>9}  {'actual':>8}  "
-        f"{'yes ROI':>8}  {'no ROI':>8}   (buy at ask, taker fee, {report.contracts} contract(s))",
+        (
+            f"{'bucket':>9}  {'n':>5}  {'predicted':>9}  {'actual':>8}  "
+            f"{'yes ROI':>8}  {'no ROI':>8}   (buy at ask, taker fee, {report.contracts} contract(s))"
+        ),
     ]
     for b in report.buckets:
         label = f"{b.lower * 100:.0f}-{b.upper * 100:.0f}%"

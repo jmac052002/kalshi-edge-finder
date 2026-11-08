@@ -81,7 +81,7 @@ python -m kalshi_edge.collect --config config/series.example.json --mode snapsho
 # one candlestick history per market; later runs read the cache.
 python -m kalshi_edge.calibrate --series KXNFLGAME
 
-# Cutoff twelve hours before kickoff, ten contracts per market, JSON copy of the report.
+# Cutoff twelve hours earlier than the default, ten contracts per market, JSON copy of the report.
 python -m kalshi_edge.calibrate --series KXNFLGAME --lead-hours 12 --contracts 10 --json report.json
 ```
 
@@ -89,7 +89,58 @@ Useful collector flags: `--db PATH`, `--min-interval SECONDS`, `--limit N` (page
 
 ### Sample calibration output
 
-Not yet captured. This section will be filled with the output of a real `calibrate --series KXNFLGAME` run before the calibration PR is merged; nothing here is made up.
+Real output from a run on 2026-11-08, after `collect --mode settled --series KXNFLGAME` had stored 1,010 settled contracts (505 games). Only 246 contracts, 122 games played between 9 September and 8 November 2026, have candlestick history: Kalshi's candlestick endpoint returns 404 for every market archived before its 2026-09-09 cutoff, which the report counts as `not_found`. The default window (`--event-hours 4`, so the last two-sided hourly bar before the scheduled kickoff):
+
+```text
+calibration  series=KXNFLGAME  generated=2026-11-08T20:44:10Z
+settled=1010  with_pre_event_quote=246  observations=122 (one contract per event)
+candles fetched=1010  cached=0  skipped: not_binary=14, no_quote=752, duplicate_event=122, not_found=764
+cutoff source: expected_expiration_time=6, occurrence_datetime=116
+brier=0.2223  base_rate=0.5492  base_rate_brier=0.2476
+
+   bucket      n  predicted    actual   yes ROI    no ROI   (buy at ask, taker fee, 1 contract(s))
+    0-10%      0          -         -         -         -
+   10-20%      6      14.8%     33.3%    +98.0%    -23.4%
+   20-30%     11      24.1%     18.2%    -31.7%     +4.4%
+   30-40%     18      35.7%     38.9%     +1.7%     -8.5%
+   40-50%     23      44.4%     52.2%    +11.2%    -17.7%
+   50-60%     17      56.0%     64.7%    +10.7%    -24.1%
+   60-70%     26      64.0%     73.1%     +9.8%    -30.0%
+   70-80%     16      75.1%     68.8%    -11.4%    +13.9%
+   80-90%      5      83.7%     60.0%    -29.9%   +119.8%
+  90-100%      0          -         -         -         -
+```
+
+The same markets priced twelve hours earlier (`--lead-hours 12`), served from the cache except for the 246 markets whose window changed:
+
+```text
+calibration  series=KXNFLGAME  generated=2026-11-08T20:45:26Z
+settled=1010  with_pre_event_quote=246  observations=122 (one contract per event)
+candles fetched=246  cached=764  skipped: not_binary=14, no_quote=752, duplicate_event=122
+cutoff source: expected_expiration_time=6, occurrence_datetime=116
+brier=0.2244  base_rate=0.5492  base_rate_brier=0.2476
+
+   bucket      n  predicted    actual   yes ROI    no ROI   (buy at ask, taker fee, 1 contract(s))
+    0-10%      0          -         -         -         -
+   10-20%      6      16.0%     33.3%    +85.2%    -22.5%
+   20-30%     11      25.5%     18.2%    -35.1%     +6.3%
+   30-40%     18      36.1%     38.9%     +0.7%     -7.9%
+   40-50%     23      44.6%     52.2%    +10.8%    -17.4%
+   50-60%     15      55.9%     60.0%     +2.7%    -14.2%
+   60-70%     28      63.6%     75.0%    +13.5%    -35.7%
+   70-80%     17      75.6%     64.7%    -17.2%    +31.3%
+   80-90%      4      84.5%     75.0%    -13.0%    +44.9%
+  90-100%      0          -         -         -         -
+```
+
+How to read it, honestly:
+
+- **The market is informative but not sharp.** A Brier score of 0.222 beats always predicting the base rate (0.248), and the pre-kickoff price is only slightly better than the price twelve hours earlier. There is information in these prices; it is not a lot.
+- **122 games is a small sample.** The standard error of an observed win rate with `n=23` is about 10 percentage points, so every bucket's "actual" column is consistent with its "predicted" column. The six-game and five-game buckets at the ends are noise: a +98% or +120% ROI on five or six contracts is one or two games going the other way, and the twelve-hour view already moves those cells around.
+- **ROI columns are not a strategy.** They say what buying every contract in that bucket, at the ask, with the taker fee, would have returned over this sample. With `n` this small, no cell clears the bar of being distinguishable from zero. The sample grows by about 30 games a week while `collect --mode settled` keeps running before markets age out of the candlestick archive.
+- **No contract traded at 10% or below, or 90% or above, in either window.** The empty end buckets are empty because there were no such quotes, not because the model was perfect there.
+
+The skip counts classify each contract by the first reason it drops out, in the order listed, so they add up with the kept rows: 14 non-binary (both sides of seven ties, which settle `scalar`), then 752 without a quote, then 122 duplicates of a game already kept, plus the 122 observations, is 1,010. `with_pre_event_quote` is counted before that filter, which is why it is 246 and not 244: two of the tied games had quotes.
 
 `KXNFLGAME` is the game-winner series (one contract per team). `KXNFLANYTD` is anytime touchdown. Any other series ticker works the same way.
 
