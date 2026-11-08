@@ -225,3 +225,7 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Claude Code per-machine permission rules (allowlists for this clone). Local only;
+# never commit: it describes one person's machine and may name local paths.
+.claude/settings.local.json
