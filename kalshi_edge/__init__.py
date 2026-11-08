@@ -1,10 +1,10 @@
-"""Public Kalshi market-data collector.
+"""Public Kalshi market data and a calibration backtest.
 
-This package is step 1 of kalshi-edge-finder: read unauthenticated market
-data into a local SQLite file. Later steps (calibration, sportsbook
-comparison) are not implemented here.
+The collector reads unauthenticated market data into SQLite. The calibration
+command asks whether contracts priced at X% before the event resolved YES
+about X% of the time. Sportsbook comparison is not implemented.
 
 No API keys are read or sent.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

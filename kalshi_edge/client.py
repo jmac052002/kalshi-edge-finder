@@ -202,6 +202,82 @@ class KalshiClient:
             f"{path} for {series_ticker} did not end after {max_pages} pages"
         )
 
+    def get_series(self, series_ticker: str) -> dict:
+        """Series metadata, including the fee multiplier. No API key."""
+        payload = self.get_json(f"/series/{series_ticker}")
+        series = payload.get("series")
+        if not isinstance(series, dict):
+            raise KalshiAPIError(f"/series/{series_ticker} had no series object")
+        return series
+
+    def get_candlesticks(
+        self,
+        *,
+        series_ticker: str,
+        ticker: str,
+        start_ts: int,
+        end_ts: int,
+        period_interval: int,
+        historical: bool,
+    ) -> list[dict]:
+        """OHLC quotes for one market.
+
+        ``end_ts`` is inclusive of candles that end at that second. Pass the
+        reference cutoff and the response itself cannot contain a later bar.
+        Live candles use ``*_dollars`` fields. Archived candles use ``close``
+        and ``volume`` without the suffix. Callers accept both.
+
+        Archived markets 404 on the live path. ``historical=True`` reads
+        ``GET /historical/markets/{ticker}/candlesticks``.
+        """
+        if period_interval not in (1, 60, 1440):
+            raise ValueError("period_interval must be 1, 60, or 1440 minutes")
+        if historical:
+            path = f"/historical/markets/{ticker}/candlesticks"
+        else:
+            path = f"/series/{series_ticker}/markets/{ticker}/candlesticks"
+        payload = self.get_json(
+            path,
+            {
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "period_interval": period_interval,
+            },
+        )
+        candles = payload.get("candlesticks") or []
+        if not isinstance(candles, list):
+            raise KalshiAPIError(f"{path} 'candlesticks' was not a list")
+        return candles
+
+    def get_trades(
+        self,
+        *,
+        ticker: str,
+        min_ts: int,
+        max_ts: int,
+        historical: bool,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Trades for one market. The public list is newest first.
+
+        ``max_ts`` should be the reference cutoff so a trade from after the
+        decision time is not in the page.
+        """
+        path = "/historical/trades" if historical else "/markets/trades"
+        payload = self.get_json(
+            path,
+            {
+                "ticker": ticker,
+                "min_ts": min_ts,
+                "max_ts": max_ts,
+                "limit": limit,
+            },
+        )
+        trades = payload.get("trades") or []
+        if not isinstance(trades, list):
+            raise KalshiAPIError(f"{path} 'trades' was not a list")
+        return trades
+
     def _pace(self) -> None:
         if self.min_interval <= 0:
             return

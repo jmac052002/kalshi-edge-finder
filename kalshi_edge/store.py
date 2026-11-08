@@ -98,6 +98,31 @@ CREATE INDEX IF NOT EXISTS idx_markets_series_result
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_series_time
     ON price_snapshots (series_ticker, captured_at);
+
+-- Pre-event quote used for calibration. The quote columns on markets are the
+-- latest fetch, which for a finalized contract is after the outcome is known.
+-- price is the probability we score. buy_ask is what a YES buyer would have
+-- paid, and only when the book was tight enough to be a real offer.
+-- quote_source 'missing' means we already looked and found nothing before
+-- the cutoff, so a rerun does not hammer the API.
+CREATE TABLE IF NOT EXISTS reference_quotes (
+    ticker TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    series_ticker TEXT NOT NULL,
+    cutoff TEXT NOT NULL,
+    as_of TEXT,
+    yes_bid REAL,
+    yes_ask REAL,
+    trade_price REAL,
+    price REAL,
+    buy_ask REAL,
+    quote_source TEXT NOT NULL,
+    PRIMARY KEY (ticker, rule),
+    FOREIGN KEY (ticker) REFERENCES markets (ticker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reference_series_rule
+    ON reference_quotes (series_ticker, rule);
 """
 
 _UPSERT_MARKET = """
@@ -225,3 +250,93 @@ class MarketStore:
                 "SELECT COUNT(*) FROM markets WHERE result IS NOT NULL"
             ),
         }
+
+    def settled_markets(self, series_ticker: str) -> list[sqlite3.Row]:
+        """Contracts with a determination. Includes scalars; the caller decides."""
+        return list(
+            self.conn.execute(
+                """
+                SELECT ticker, series_ticker, event_ticker, title, yes_sub_title,
+                       result, settlement_value, close_time, source, last_price
+                FROM markets
+                WHERE series_ticker = ? AND result IS NOT NULL
+                ORDER BY close_time, ticker
+                """,
+                (series_ticker,),
+            )
+        )
+
+    def snapshots_by_ticker(self, series_ticker: str) -> dict[str, list[sqlite3.Row]]:
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        rows = self.conn.execute(
+            """
+            SELECT ticker, captured_at, yes_bid, yes_ask, last_price
+            FROM price_snapshots
+            WHERE series_ticker = ?
+            ORDER BY captured_at
+            """,
+            (series_ticker,),
+        )
+        for row in rows:
+            grouped.setdefault(row["ticker"], []).append(row)
+        return grouped
+
+    def cached_quotes(self, series_ticker: str, rule: str) -> dict[str, sqlite3.Row]:
+        rows = self.conn.execute(
+            """
+            SELECT ticker, cutoff, as_of, yes_bid, yes_ask, trade_price,
+                   price, buy_ask, quote_source
+            FROM reference_quotes
+            WHERE series_ticker = ? AND rule = ?
+            """,
+            (series_ticker, rule),
+        )
+        return {row["ticker"]: row for row in rows}
+
+    def save_reference_quote(
+        self,
+        *,
+        ticker: str,
+        rule: str,
+        series_ticker: str,
+        cutoff: str,
+        as_of: str | None,
+        yes_bid: float | None,
+        yes_ask: float | None,
+        trade_price: float | None,
+        price: float | None,
+        buy_ask: float | None,
+        quote_source: str,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO reference_quotes (
+                    ticker, rule, series_ticker, cutoff, as_of,
+                    yes_bid, yes_ask, trade_price, price, buy_ask, quote_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker, rule) DO UPDATE SET
+                    series_ticker = excluded.series_ticker,
+                    cutoff = excluded.cutoff,
+                    as_of = excluded.as_of,
+                    yes_bid = excluded.yes_bid,
+                    yes_ask = excluded.yes_ask,
+                    trade_price = excluded.trade_price,
+                    price = excluded.price,
+                    buy_ask = excluded.buy_ask,
+                    quote_source = excluded.quote_source
+                """,
+                (
+                    ticker,
+                    rule,
+                    series_ticker,
+                    cutoff,
+                    as_of,
+                    yes_bid,
+                    yes_ask,
+                    trade_price,
+                    price,
+                    buy_ask,
+                    quote_source,
+                ),
+            )

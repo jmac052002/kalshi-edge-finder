@@ -170,6 +170,33 @@ def test_paces_between_requests():
     assert 0.25 in sleeps
 
 
+def test_candles_and_trades_use_the_historical_paths():
+    def handler(url, params, timeout):
+        if url.endswith("/candlesticks"):
+            return FakeResponse(200, {"ticker": "M", "candlesticks": [{"end_period_ts": 1}]})
+        if url.endswith("/trades"):
+            return FakeResponse(200, {"trades": [], "cursor": ""})
+        return FakeResponse(200, {"series": {"fee_multiplier": 1}})
+
+    client = _client(handler)
+    candles = client.get_candlesticks(
+        series_ticker="KXNFLGAME",
+        ticker="MKT-1",
+        start_ts=10,
+        end_ts=20,
+        period_interval=60,
+        historical=True,
+    )
+    assert candles == [{"end_period_ts": 1}]
+    assert client.session.calls[0]["url"].endswith("/historical/markets/MKT-1/candlesticks")
+    assert client.session.calls[0]["params"]["end_ts"] == 20
+    client.get_trades(ticker="MKT-1", min_ts=10, max_ts=20, historical=False, limit=5)
+    trade_call = client.session.calls[1]
+    assert trade_call["url"].endswith("/markets/trades")
+    assert trade_call["params"]["max_ts"] == 20
+    assert "Authorization" not in client.session.headers
+
+
 def test_session_sends_no_credentials():
     client = KalshiClient(min_interval=0)
     try:
