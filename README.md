@@ -1,10 +1,18 @@
 # kalshi-edge-finder
 
-A Python collector that reads [Kalshi](https://kalshi.com) prediction-market data from the public Trade API and stores it in a local SQLite file. No account and no API key.
+Python tools that read [Kalshi](https://kalshi.com) prediction-market data from the public Trade API, store it in a local SQLite file, and check whether the prices were honest probabilities. No account and no API key.
 
-This repository is step 1 of a learning project: get clean market data onto disk so later code can ask whether a contract priced at 45 cents actually resolves YES about 45% of the time, and how that price compares with a sportsbook. Those later steps are not built yet. See [Roadmap](#roadmap).
+This is a learning project in two parts so far. `kalshi_edge.collect` gets clean market data onto disk. `kalshi_edge.calibrate` asks the question that data is for: did contracts priced at 45 cents resolve YES about 45% of the time, and would buying them have made money after fees? Comparing those prices with a sportsbook is not built yet. See [Roadmap](#roadmap).
 
 ## What exists now
+
+| Command | What it does |
+| --- | --- |
+| `python -m kalshi_edge.collect --mode snapshot` | Stores open markets and a timestamped price row |
+| `python -m kalshi_edge.collect --mode settled` | Stores finalized markets and how they resolved |
+| `python -m kalshi_edge.calibrate` | Fetches each settled market's pre-event price and prints a calibration table with Brier score and fee-adjusted ROI |
+
+### Collector
 
 `kalshi_edge.collect` does two things, for whatever series tickers you pass it. Nothing in the code is NFL-specific; `KXNFLGAME` is just an example.
 
@@ -22,6 +30,24 @@ The public base URL is `https://api.elections.kalshi.com/trade-api/v2`. The host
 Quotes are read from the fixed-point dollar strings (`yes_bid_dollars`, `last_price_dollars`, …) and the contract-count strings (`volume_fp`, `open_interest_fp`). The older integer cent fields came back null and are ignored. A null or garbage field becomes SQL `NULL`; it does not drop the market.
 
 Requests are spaced (default 0.25s) and retried with exponential backoff on connection errors and HTTP 429/5xx. Pages follow the response `cursor` until it is empty. A repeated cursor stops the loop. Hitting `--max-pages` is an error, so a stuck cursor cannot quietly cut a sample short.
+
+### Calibration backtest
+
+`kalshi_edge.calibrate` takes the settled markets of one series and asks, bucket by bucket, whether the price before the event matched how often the event happened.
+
+**Where the pre-event price comes from.** Quotes stored on a finalized market are useless as forecasts: once the game is over the last trade sits at $0.99 or $0.01. The backtest instead reads the public candlestick history (`GET /series/{series}/markets/{ticker}/candlesticks`, hourly bars, no auth) and takes the closing bid and ask of the last bar that **ended at or before the event started**. A bar that ends at kickoff was formed entirely before kickoff, so nothing in it can know the result.
+
+**What "event started" means.** Kalshi publishes `occurrence_datetime`, the scheduled start of the underlying event, on markets that have one. That is the cutoff when it exists. When it is missing the backtest falls back to `expected_expiration_time` (then `close_time`) minus `--event-hours` (default 4): sports markets trade through the game, so the close is after the final whistle, and a cutoff that is not pushed back far enough would quietly turn a half-time quote into a "pre-game" one. The report says how many observations used each source, so a run that leaned on the fallback is visible. `--lead-hours N` moves every cutoff N hours earlier for a "what did the market say that morning" view.
+
+**One contract per game.** A game-winner event lists both teams, and "A wins" is "B loses". Counting both doubles the sample without adding information, so by default the lowest ticker in each event is kept (ticker order is by team abbreviation, which does not know who was favored). `--all-contracts` keeps both sides.
+
+**What is reported.** For each probability bucket (default ten of 10%): the number of contracts, the mean midpoint, the realized YES rate, and the fee-adjusted return of buying each side at the ask and holding to settlement. The Brier score (mean squared error of the midpoint against the 0/1 outcome, lower is better) summarizes the series, next to the Brier score of a constant forecast at the base rate as the floor a forecast with no game-specific information would reach.
+
+**Fees.** Kalshi's taker fee is `round_up(0.07 × C × P × (1 − P))` per order, rounded up to the cent ([fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf)). There is no settlement fee. `P(1 − P)` peaks at 50 cents, so the middle of the board is the most expensive place to trade and that is where "calibrated but unprofitable" shows up. The ROI columns pay the fee on every purchase, at `--contracts` contracts per market (default 1; rounding up per order makes single contracts slightly pessimistic, which is the right direction to be wrong in).
+
+**What the numbers do not say.** The ROI is for one contract per market. A multi-leg parlay multiplies its legs: if each leg is fairly priced and costs a fee, the combination's expected return is the product of each leg's (negative) expected return, which is worse, not better, than the legs alone. Nothing in this table turns a long-shot combo into a positive-expectation bet.
+
+Pre-event quotes are cached in the `pre_event_prices` table, one request per market on the first run and none after. `--refresh` throws the cache away. `--max-fetch N` caps the number of candlestick requests, for a quick first look at a big series.
 
 ## Setup
 
@@ -50,9 +76,20 @@ python -m kalshi_edge.collect --series KXNFLGAME --mode settled
 
 # Series list from a JSON file: {"series": ["KXNFLGAME", "KXNFLANYTD"]}
 python -m kalshi_edge.collect --config config/series.example.json --mode snapshot
+
+# Calibration of the settled markets collected above. The first run fetches
+# one candlestick history per market; later runs read the cache.
+python -m kalshi_edge.calibrate --series KXNFLGAME
+
+# Cutoff twelve hours before kickoff, ten contracts per market, JSON copy of the report.
+python -m kalshi_edge.calibrate --series KXNFLGAME --lead-hours 12 --contracts 10 --json report.json
 ```
 
-Useful flags: `--db PATH`, `--min-interval SECONDS`, `--limit N` (page size, 1–1000), `--max-pages N`, `--base-url URL`.
+Useful collector flags: `--db PATH`, `--min-interval SECONDS`, `--limit N` (page size, 1–1000), `--max-pages N`, `--base-url URL`. Calibration flags: `--buckets N`, `--contracts N`, `--all-contracts`, `--lookback-hours H`, `--event-hours H`, `--lead-hours H`, `--refresh`, `--max-fetch N`, `--json PATH`.
+
+### Sample calibration output
+
+Not yet captured. This section will be filled with the output of a real `calibrate --series KXNFLGAME` run before the calibration PR is merged; nothing here is made up.
 
 `KXNFLGAME` is the game-winner series (one contract per team). `KXNFLANYTD` is anytime touchdown. Any other series ticker works the same way.
 
@@ -73,19 +110,21 @@ Buying NO at 0.53 is economically close to selling YES at 0.47, because the two 
 
 `status=open` on the query matches markets whose own `status` field is `active`. `status=settled` matches `finalized`. The row stores that lifecycle status, plus `result` (`yes`, `no`, or `scalar`) once the exchange has determined the market. `settlement_value` is the dollars a YES holder is paid: 1 or 0 on a binary contract, a fraction on a scalar. A tie is neither team's win. On `KXNFLGAME` those contracts have come back as `scalar` with `settlement_value` 0.5, so each side paid half.
 
-**Do not treat `markets.last_price` on a finalized row as the forecast.** After the outcome is known the last trade sits near 0 or 1, which would make every market look perfectly calibrated. `price_snapshots` is the table of quotes taken while a snapshot run was pointed at open markets. Comparing those rows to `markets.result` is the calibration question, and it is not computed here.
+**Do not treat `markets.last_price` on a finalized row as the forecast.** After the outcome is known the last trade sits near 0 or 1, which would make every market look perfectly calibrated. `price_snapshots` holds quotes taken while a snapshot run was pointed at open markets, and `pre_event_prices` holds the quote the backtest recovered from candlesticks as of the event's start. Comparing either to `markets.result` is the calibration question; `kalshi_edge.calibrate` does it with the second.
 
 A game-winner event has two contracts (one per team) under the same `event_ticker`. They are one game, not two independent samples.
 
-Candlesticks (`GET /series/{series_ticker}/markets/{ticker}/candlesticks`) and trades (`GET /markets/trades`) also answer without auth. They are the way to recover prices from before a market resolved. This collector does not store them yet. Pulling a settled market's last trade and calling it the pre-game price would be the wrong dataset.
+Candlesticks (`GET /series/{series_ticker}/markets/{ticker}/candlesticks`) and trades (`GET /markets/trades`) also answer without auth. They are the way to recover prices from before a market resolved; the backtest uses the candlesticks. Pulling a settled market's last trade and calling it the pre-game price would be the wrong dataset.
 
 ## Database
 
-SQLite, schema version 1 in `schema_meta`.
+SQLite, schema version 2 in `schema_meta`. A version 1 file is upgraded in place on open (two columns are added to `markets`; they stay `NULL` until the next `settled` run rewrites each row).
 
-`markets` — one row per ticker. Reruns update the row. `source` is `live` or `historical`. A live row that already has a `result` is kept when the same ticker also shows up in the archive. A snapshot of a market that had not resolved yet does not block a later historical settlement: after Kalshi archives the contract, that archive row is the only copy of the payoff. The open-market price snapshot stays either way.
+`markets` — one row per ticker. Reruns update the row. `occurrence_datetime` and `expected_expiration_time` are the event timing fields the backtest reads. `source` is `live` or `historical`. A live row that already has a `result` is kept when the same ticker also shows up in the archive. A snapshot of a market that had not resolved yet does not block a later historical settlement: after Kalshi archives the contract, that archive row is the only copy of the payoff. The open-market price snapshot stays either way.
 
 `price_snapshots` — primary key `(ticker, captured_at)`. Float columns are the parsed dollar prices. `yes_bid_dollars` and the other `*_dollars` columns keep the API's original strings.
+
+`pre_event_prices` — one row per ticker: `cutoff_ts` (Unix second treated as the event start), `cutoff_source` (which market field it came from), `candle_end_ts` and the closing `yes_bid` / `yes_ask` / `last_price` of the chosen bar. A market with no two-sided bar before the cutoff is stored with those `NULL` so the miss is remembered.
 
 ```sql
 -- Book from the newest snapshot run.
@@ -112,14 +151,14 @@ WHERE series_ticker = 'KXNFLGAME'
 pytest
 ```
 
-The tests parse fixture payloads and talk to a fake HTTP session. They do not call Kalshi.
+The tests parse fixture payloads (including a candlestick history in `tests/fixtures/`) and talk to a fake HTTP session. They do not call Kalshi. The fee tests check the formula against the worked examples in Kalshi's fee schedule.
 
 ## Roadmap
 
 Not built. Nothing below is in this repository yet.
 
-* **Calibration.** Bucket open-market snapshots by price and compare each bucket to the share that later settled YES. Needs the snapshot history this collector is starting to record, and the settled results it already stores. Counting both sides of one game as independent samples would double-count the game.
-* **Pre-resolution history for markets that already settled.** Public candlestick and trade endpoints can supply the price from before the outcome was known. Not collected yet.
+* **Calibration from the snapshot history.** The backtest uses candlesticks; a second view built from `price_snapshots` (prices at the exact moments the collector ran) would cross-check it once enough snapshot runs exist.
+* **Calibration chart.** A PNG of predicted against realized rates per bucket. The `--json` report has everything a plot needs.
 * **Sportsbook comparison.** Match a Kalshi contract to a sportsbook line, remove the book's vig, and compare implied probabilities. No sportsbook client and no matching.
 * **Parlays, break-even, and expected value.** Not implemented.
 

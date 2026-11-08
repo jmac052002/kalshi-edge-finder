@@ -1,5 +1,7 @@
 """Parsing tests. Payloads are fixtures shaped like the public API, not live calls."""
 
+import pytest
+
 from kalshi_edge.parse import parse_fixed_point, parse_market, parse_snapshot
 
 OPEN_MARKET = {
@@ -155,3 +157,47 @@ def test_snapshot_keeps_raw_dollar_strings():
     assert snapshot.no_bid == 0.53
     assert snapshot.captured_at == "2026-11-08T19:00:00Z"
     assert snapshot.series_ticker == "KXNFLGAME"
+
+
+def test_market_keeps_event_timing_fields():
+    from kalshi_edge.parse import parse_market
+
+    market = parse_market(
+        {
+            "ticker": "T",
+            "occurrence_datetime": "2026-11-08T18:00:00Z",
+            "expected_expiration_time": "2026-11-08T22:00:00Z",
+        },
+        series_ticker="KXNFLGAME",
+        source="live",
+        fetched_at="2026-11-09T00:00:00Z",
+    )
+    assert market.occurrence_datetime == "2026-11-08T18:00:00Z"
+    assert market.expected_expiration_time == "2026-11-08T22:00:00Z"
+
+
+def test_candles_parse_closing_quotes_and_sort_by_time():
+    import json
+    from pathlib import Path
+
+    from kalshi_edge.parse import parse_candles
+
+    payload = json.loads(Path(__file__).with_name("fixtures").joinpath("candlesticks.json").read_text())
+    candles = parse_candles(list(reversed(payload["candlesticks"])))
+    assert [c.end_ts for c in candles] == sorted(c.end_ts for c in candles)
+    first = candles[0]
+    assert (first.yes_bid, first.yes_ask, first.last_price) == (0.40, 0.44, 0.42)
+    assert first.midpoint == pytest.approx(0.42)
+    assert first.volume == 120.0
+    one_sided = candles[2]
+    assert one_sided.yes_bid is None and one_sided.yes_ask == 0.45
+    assert one_sided.midpoint is None
+
+
+def test_candles_without_end_time_are_dropped():
+    from kalshi_edge.parse import parse_candles
+
+    assert parse_candles([{"yes_bid": {}}, "junk", {"end_period_ts": True}]) == []
+    assert parse_candles("not a list") == []
+    (candle,) = parse_candles([{"end_period_ts": "1700000000"}])
+    assert candle.end_ts == 1700000000 and candle.yes_bid is None

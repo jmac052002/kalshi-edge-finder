@@ -10,6 +10,11 @@ Two tables, on purpose:
   a new timestamp append. Query it for "what was the market charging while
   the contract was still open?"
 
+* ``pre_event_prices`` is one row per contract: the quote the calibration
+  backtest recovered from the candlestick history as of the event's start.
+  It is a cache of public data that is expensive to refetch, not a source
+  of truth; ``calibrate --refresh`` rebuilds it.
+
 The primary keys make writes idempotent. Inserting the same market twice
 updates it. Inserting the same (ticker, captured_at) snapshot twice updates
 it. Nothing here deletes a row, so a second settled run cannot wipe a
@@ -30,7 +35,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from kalshi_edge.parse import ParsedMarket, PriceSnapshot
+from kalshi_edge.parse import ParsedMarket, PreEventPrice, PriceSnapshot
+
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -54,6 +61,8 @@ CREATE TABLE IF NOT EXISTS markets (
     result TEXT,
     open_time TEXT,
     close_time TEXT,
+    expected_expiration_time TEXT,
+    occurrence_datetime TEXT,
     settlement_ts TEXT,
     expiration_value TEXT,
     settlement_value REAL,
@@ -93,8 +102,28 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
     FOREIGN KEY (ticker) REFERENCES markets (ticker)
 );
 
+-- One row per contract: the pre-event quote recovered from candlesticks.
+-- cutoff_ts is the Unix second treated as the event start. candle_end_ts and
+-- the quotes are NULL when no candle with a two-sided book was found before
+-- the cutoff; the row still exists so the miss is remembered.
+CREATE TABLE IF NOT EXISTS pre_event_prices (
+    ticker TEXT PRIMARY KEY,
+    series_ticker TEXT NOT NULL,
+    cutoff_ts INTEGER NOT NULL,
+    cutoff_source TEXT NOT NULL,
+    candle_end_ts INTEGER,
+    yes_bid REAL,
+    yes_ask REAL,
+    last_price REAL,
+    fetched_at TEXT NOT NULL,
+    FOREIGN KEY (ticker) REFERENCES markets (ticker)
+);
+
 CREATE INDEX IF NOT EXISTS idx_markets_series_result
     ON markets (series_ticker, result);
+
+CREATE INDEX IF NOT EXISTS idx_pre_event_series
+    ON pre_event_prices (series_ticker);
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_series_time
     ON price_snapshots (series_ticker, captured_at);
@@ -103,12 +132,14 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_series_time
 _UPSERT_MARKET = """
 INSERT INTO markets (
     ticker, series_ticker, event_ticker, title, yes_sub_title, market_type,
-    status, result, open_time, close_time, settlement_ts, expiration_value,
+    status, result, open_time, close_time, expected_expiration_time,
+    occurrence_datetime, settlement_ts, expiration_value,
     settlement_value, notional_value, yes_bid, yes_ask, no_bid, no_ask,
     last_price, volume, open_interest, source, fetched_at
 ) VALUES (
     ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?
 )
@@ -122,6 +153,8 @@ ON CONFLICT(ticker) DO UPDATE SET
     result = excluded.result,
     open_time = excluded.open_time,
     close_time = excluded.close_time,
+    expected_expiration_time = excluded.expected_expiration_time,
+    occurrence_datetime = excluded.occurrence_datetime,
     settlement_ts = excluded.settlement_ts,
     expiration_value = excluded.expiration_value,
     settlement_value = excluded.settlement_value,
@@ -175,6 +208,28 @@ ON CONFLICT(ticker, captured_at) DO UPDATE SET
 """
 
 
+_UPSERT_PRE_EVENT = """
+INSERT INTO pre_event_prices (
+    ticker, series_ticker, cutoff_ts, cutoff_source, candle_end_ts,
+    yes_bid, yes_ask, last_price, fetched_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(ticker) DO UPDATE SET
+    series_ticker = excluded.series_ticker,
+    cutoff_ts = excluded.cutoff_ts,
+    cutoff_source = excluded.cutoff_source,
+    candle_end_ts = excluded.candle_end_ts,
+    yes_bid = excluded.yes_bid,
+    yes_ask = excluded.yes_ask,
+    last_price = excluded.last_price,
+    fetched_at = excluded.fetched_at
+"""
+
+# Columns added after schema version 1. A version-1 file gets them through
+# ALTER TABLE so an existing collection is kept; the new columns are NULL
+# until the next ``collect --mode settled`` run rewrites each market row.
+_MARKET_COLUMNS_SINCE_V1 = ("expected_expiration_time", "occurrence_datetime")
+
+
 class MarketStore:
     """A SQLite file. The path's parent directory is created if needed."""
 
@@ -185,11 +240,32 @@ class MarketStore:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self._migrate()
         self.conn.executescript(SCHEMA)
         self.conn.execute(
-            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1')"
+            "INSERT INTO schema_meta (key, value) VALUES ('version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(SCHEMA_VERSION),),
         )
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring a file written by an older version up to the current schema.
+
+        Only additive changes so far, which SQLite can do in place. The
+        column names are our own constants, never user input, so building
+        the ALTER statement with them is not an injection surface.
+        """
+        tables = {
+            row[0]
+            for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if "markets" not in tables:
+            return  # fresh file: executescript creates everything
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(markets)")}
+        for column in _MARKET_COLUMNS_SINCE_V1:
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE markets ADD COLUMN {column} TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -213,6 +289,54 @@ class MarketStore:
                 self.conn.executemany(
                     _UPSERT_SNAPSHOT, [snapshot.as_tuple() for snapshot in snapshots]
                 )
+
+    def settled_markets(self, series_ticker: str) -> list[sqlite3.Row]:
+        """Every market in the series that Kalshi has determined.
+
+        ``result`` is set once the exchange rules on the outcome, whether or
+        not the row has since been archived. Rows are ordered by ticker so a
+        run is deterministic.
+        """
+        return self.conn.execute(
+            "SELECT * FROM markets WHERE series_ticker = ? AND result IS NOT NULL "
+            "ORDER BY ticker",
+            (series_ticker,),
+        ).fetchall()
+
+    def pre_event_prices(self, series_ticker: str) -> dict[str, PreEventPrice]:
+        """Cached pre-event quotes for the series, keyed by ticker."""
+        rows = self.conn.execute(
+            "SELECT * FROM pre_event_prices WHERE series_ticker = ?",
+            (series_ticker,),
+        ).fetchall()
+        return {
+            row["ticker"]: PreEventPrice(
+                ticker=row["ticker"],
+                series_ticker=row["series_ticker"],
+                cutoff_ts=int(row["cutoff_ts"]),
+                cutoff_source=row["cutoff_source"],
+                candle_end_ts=row["candle_end_ts"],
+                yes_bid=row["yes_bid"],
+                yes_ask=row["yes_ask"],
+                last_price=row["last_price"],
+                fetched_at=row["fetched_at"],
+            )
+            for row in rows
+        }
+
+    def save_pre_event_price(self, price: PreEventPrice) -> None:
+        """Insert or replace one cached quote. Committed at once: a long
+        fetch that is interrupted keeps what it had already found."""
+        with self.conn:
+            self.conn.execute(_UPSERT_PRE_EVENT, price.as_tuple())
+
+    def clear_pre_event_prices(self, series_ticker: str) -> int:
+        """Forget the cached quotes for one series. Returns rows removed."""
+        with self.conn:
+            cursor = self.conn.execute(
+                "DELETE FROM pre_event_prices WHERE series_ticker = ?", (series_ticker,)
+            )
+        return cursor.rowcount
 
     def counts(self) -> dict[str, int]:
         def one(sql: str) -> int:
