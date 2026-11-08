@@ -53,6 +53,11 @@ class FakeClient:
     def __init__(self, open_bid="0.4500"):
         self.calls = []
         self.open_bid = open_bid
+        self.series_calls = []
+
+    def get_series(self, series_ticker):
+        self.series_calls.append(series_ticker)
+        return {"series": {"ticker": series_ticker, "fee_type": "quadratic", "fee_multiplier": 1}}
 
     def iter_market_pages(self, *, series_ticker, status=None, historical=False, limit=200, max_pages=500):
         self.calls.append(
@@ -235,6 +240,9 @@ def test_main_reports_api_failure(tmp_path, monkeypatch):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
+        def get_series(self, series_ticker):
+            raise KalshiAPIError("down")
+
         def iter_market_pages(self, **kwargs):
             raise KalshiAPIError("down")
 
@@ -249,3 +257,26 @@ def test_main_reports_api_failure(tmp_path, monkeypatch):
 def test_main_rejects_missing_series(tmp_path):
     code = main(["--mode", "snapshot", "--db", str(tmp_path / "x.db")])
     assert code == 2
+
+
+def test_collect_refreshes_series_fee_schedule(tmp_path):
+    """Each run stores fee_type/fee_multiplier from GET /series so compare charges the real fee."""
+    client = FakeClient()
+    with MarketStore(tmp_path / "k.db") as store:
+        run(series=["KXNFLGAME"], mode="snapshot", client=client, store=store, now="2026-11-08T19:00:00Z")
+        fee = store.series_fee("KXNFLGAME")
+    assert client.series_calls == ["KXNFLGAME"]
+    assert fee is not None
+    assert (fee.fee_type, fee.fee_multiplier, fee.fetched_at) == ("quadratic", "1", "2026-11-08T19:00:00Z")
+
+
+def test_series_fee_failure_does_not_stop_collection(tmp_path, caplog):
+    class NoSeries(FakeClient):
+        def get_series(self, series_ticker):
+            raise KalshiAPIError("503 from /series", status_code=503)
+
+    with MarketStore(tmp_path / "k.db") as store:
+        stats = run(series=["KXNFLGAME"], mode="snapshot", client=NoSeries(), store=store, now="2026-11-08T19:00:00Z")
+        assert store.series_fee("KXNFLGAME") is None
+    assert stats.markets_written == 1
+    assert "could not refresh fee schedule" in caplog.text

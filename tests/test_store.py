@@ -249,7 +249,7 @@ def test_version_1_file_is_migrated_in_place(tmp_path):
         assert row["occurrence_datetime"] is None
         assert row["result"] == "yes"
         version = store.conn.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()[0]
-        assert version == "2"
+        assert version == "3"
         # The new table exists and the old row can be re-saved with the new fields.
         store.save_page([_market("OLD-1", occurrence_datetime="2026-11-08T18:00:00Z")], [])
         row = store.conn.execute("SELECT occurrence_datetime FROM markets WHERE ticker = 'OLD-1'").fetchone()

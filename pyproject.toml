@@ -1,0 +1,12 @@
+[project]
+name = "kalshi-edge-finder"
+version = "0.1.0"
+description = "Kalshi market data, calibration backtest, and sportsbook comparison"
+requires-python = ">=3.11"
+dependencies = ["requests>=2.31", "tzdata>=2024.1"]
+
+[tool.ruff]
+# Pin the target so lint results do not depend on which interpreter ruff
+# happens to find. 3.11 is the oldest version the code supports.
+target-version = "py311"
+line-length = 120

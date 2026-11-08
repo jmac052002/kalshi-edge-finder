@@ -416,3 +416,37 @@ class PreEventPrice:
             self.fetched_at,
             int(self.history_missing),
         )
+
+
+@dataclass(frozen=True)
+class SeriesFee:
+    """The fee schedule Kalshi publishes for one series.
+
+    ``fee_type`` names the formula (``quadratic`` on game markets) and
+    ``fee_multiplier`` scales it. Both are kept as the API's text; the
+    arithmetic in ``kalshi_edge.fees`` parses the multiplier with Decimal.
+    """
+
+    series_ticker: str
+    fee_type: str | None
+    fee_multiplier: str | None
+    fetched_at: str
+
+    def as_tuple(self) -> tuple:
+        return (self.series_ticker, self.fee_type, self.fee_multiplier, self.fetched_at)
+
+
+def parse_series_fee(payload: dict, *, series_ticker: str, fetched_at: str) -> SeriesFee:
+    """Read ``fee_type`` and ``fee_multiplier`` from a ``GET /series/{ticker}`` response.
+
+    The object may arrive wrapped (``{"series": {...}}``) or bare. Missing
+    fields become ``None``; the fee module then falls back to the published
+    defaults and the report says so.
+    """
+    body = payload.get("series") if isinstance(payload.get("series"), dict) else payload
+    return SeriesFee(
+        series_ticker=series_ticker,
+        fee_type=_text(body, "fee_type"),
+        fee_multiplier=_raw_dollars(body, "fee_multiplier"),
+        fetched_at=fetched_at,
+    )

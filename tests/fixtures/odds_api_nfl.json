@@ -1,0 +1,114 @@
+[
+  {
+    "id": "evt-cinatl",
+    "sport_key": "americanfootball_nfl",
+    "sport_title": "NFL",
+    "commence_time": "2026-11-08T18:00:00Z",
+    "home_team": "Atlanta Falcons",
+    "away_team": "Cincinnati Bengals",
+    "bookmakers": [
+      {
+        "key": "pinnacle",
+        "title": "Pinnacle",
+        "last_update": "2026-11-08T17:30:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-11-08T17:30:00Z",
+            "outcomes": [
+              {"name": "Atlanta Falcons", "price": 1.80},
+              {"name": "Cincinnati Bengals", "price": 2.10}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2026-11-08T17:29:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "Atlanta Falcons", "price": 1.74},
+              {"name": "Cincinnati Bengals", "price": 2.15}
+            ]
+          },
+          {
+            "key": "spreads",
+            "outcomes": [
+              {"name": "Atlanta Falcons", "price": 1.91, "point": -2.5},
+              {"name": "Cincinnati Bengals", "price": 1.91, "point": 2.5}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "fanduel",
+        "title": "FanDuel",
+        "last_update": "2026-11-08T17:31:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "Atlanta Falcons", "price": 1.77},
+              {"name": "Cincinnati Bengals", "price": 2.12}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "evt-lacbal",
+    "sport_key": "americanfootball_nfl",
+    "sport_title": "NFL",
+    "commence_time": "2026-11-17T01:15:00Z",
+    "home_team": "Baltimore Ravens",
+    "away_team": "Los Angeles Chargers",
+    "bookmakers": [
+      {
+        "key": "draftkings",
+        "title": "DraftKings",
+        "last_update": "2026-11-08T17:29:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "Baltimore Ravens", "price": 1.50},
+              {"name": "Los Angeles Chargers", "price": 2.70}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "fanduel",
+        "title": "FanDuel",
+        "last_update": "2026-11-08T17:31:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "Baltimore Ravens", "price": 1.53},
+              {"name": "Los Angeles Chargers", "price": 2.60}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "betmgm",
+        "title": "BetMGM",
+        "last_update": "2026-11-08T17:20:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "outcomes": [
+              {"name": "Baltimore Ravens", "price": 1.48},
+              {"name": "Los Angeles Chargers", "price": 2.75}
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

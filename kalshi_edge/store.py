@@ -15,6 +15,11 @@ Two tables, on purpose:
   It is a cache of public data that is expensive to refetch, not a source
   of truth; ``calibrate --refresh`` rebuilds it.
 
+* ``sportsbook_odds`` is one row per bookmaker outcome per capture, as the
+  odds provider sent it. ``series_fees`` is the fee schedule Kalshi
+  publishes per series. ``line_matches`` records which sportsbook game each
+  Kalshi event was tied to, so a wrong match can be traced.
+
 The primary keys make writes idempotent. Inserting the same market twice
 updates it. Inserting the same (ticker, captured_at) snapshot twice updates
 it. Nothing here deletes a row, so a second settled run cannot wipe a
@@ -36,9 +41,10 @@ import sqlite3
 from pathlib import Path
 from typing import Self
 
-from kalshi_edge.parse import ParsedMarket, PreEventPrice, PriceSnapshot
+from kalshi_edge.parse import ParsedMarket, PreEventPrice, PriceSnapshot, SeriesFee
+from kalshi_edge.sportsbook.parse import OddsCapture, OddsRow
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -122,6 +128,67 @@ CREATE TABLE IF NOT EXISTS pre_event_prices (
     fetched_at TEXT NOT NULL,
     history_missing INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (ticker) REFERENCES markets (ticker)
+);
+
+-- One row per odds run, written even when the provider returned no
+-- moneylines. The newest row here, not the newest outcome row, defines the
+-- "latest capture": an empty capture must supersede older odds, otherwise
+-- compare would keep pricing contracts against lines that are gone.
+CREATE TABLE IF NOT EXISTS odds_captures (
+    source TEXT NOT NULL,
+    sport_key TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    regions TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    PRIMARY KEY (source, sport_key, captured_at)
+);
+
+-- One row per bookmaker outcome per capture. Prices stay exactly as the
+-- provider sent them (decimal odds as text). Nothing here is de-vigged:
+-- that is a query-time calculation so the method can change without
+-- re-collecting. captured_at is our run timestamp; book_updated is the
+-- bookmaker's own last_update.
+CREATE TABLE IF NOT EXISTS sportsbook_odds (
+    source TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    sport_key TEXT NOT NULL,
+    commence_time TEXT NOT NULL,
+    home_team TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    bookmaker TEXT NOT NULL,
+    market TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    price_decimal TEXT NOT NULL,
+    book_updated TEXT,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (source, event_id, bookmaker, market, outcome, captured_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sportsbook_sport_time
+    ON sportsbook_odds (sport_key, captured_at);
+
+-- Which sportsbook game a Kalshi event was tied to, and how. Rewritten on
+-- every compare run; kept so a wrong match is debuggable after the fact.
+-- kickoff_delta_s is commence_time minus the ticker date at midnight US
+-- Eastern, so a 01:15Z Monday kickoff shows as ~73,000 s past Sunday.
+CREATE TABLE IF NOT EXISTS line_matches (
+    event_ticker TEXT NOT NULL,
+    source TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    kickoff_delta_s INTEGER,
+    matched_at TEXT NOT NULL,
+    PRIMARY KEY (event_ticker, source)
+);
+
+-- Fee schedule per series from GET /series/{ticker}. Raw strings: the
+-- multiplier is parsed with Decimal where it is used.
+CREATE TABLE IF NOT EXISTS series_fees (
+    series_ticker TEXT PRIMARY KEY,
+    fee_type TEXT,
+    fee_multiplier TEXT,
+    fetched_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_series_result
@@ -229,6 +296,48 @@ ON CONFLICT(ticker) DO UPDATE SET
     last_price = excluded.last_price,
     fetched_at = excluded.fetched_at,
     history_missing = excluded.history_missing
+"""
+
+_UPSERT_ODDS = """
+INSERT INTO sportsbook_odds (
+    source, event_id, sport_key, commence_time, home_team, away_team,
+    bookmaker, market, outcome, price_decimal, book_updated, captured_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(source, event_id, bookmaker, market, outcome, captured_at) DO UPDATE SET
+    sport_key = excluded.sport_key,
+    commence_time = excluded.commence_time,
+    home_team = excluded.home_team,
+    away_team = excluded.away_team,
+    price_decimal = excluded.price_decimal,
+    book_updated = excluded.book_updated
+"""
+
+_UPSERT_CAPTURE = """
+INSERT INTO odds_captures (source, sport_key, captured_at, regions, events, rows)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(source, sport_key, captured_at) DO UPDATE SET
+    regions = excluded.regions,
+    events = excluded.events,
+    rows = excluded.rows
+"""
+
+_UPSERT_MATCH = """
+INSERT INTO line_matches (event_ticker, source, event_id, method, kickoff_delta_s, matched_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(event_ticker, source) DO UPDATE SET
+    event_id = excluded.event_id,
+    method = excluded.method,
+    kickoff_delta_s = excluded.kickoff_delta_s,
+    matched_at = excluded.matched_at
+"""
+
+_UPSERT_SERIES_FEE = """
+INSERT INTO series_fees (series_ticker, fee_type, fee_multiplier, fetched_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(series_ticker) DO UPDATE SET
+    fee_type = excluded.fee_type,
+    fee_multiplier = excluded.fee_multiplier,
+    fetched_at = excluded.fetched_at
 """
 
 # Columns added after schema version 1. A version-1 file gets them through
@@ -353,6 +462,79 @@ class MarketStore:
                 "DELETE FROM pre_event_prices WHERE series_ticker = ?", (series_ticker,)
             )
         return cursor.rowcount
+
+    def save_series_fee(self, fee: SeriesFee) -> None:
+        with self.conn:
+            self.conn.execute(_UPSERT_SERIES_FEE, fee.as_tuple())
+
+    def series_fee(self, series_ticker: str) -> SeriesFee | None:
+        row = self.conn.execute(
+            "SELECT * FROM series_fees WHERE series_ticker = ?", (series_ticker,)
+        ).fetchone()
+        if row is None:
+            return None
+        return SeriesFee(
+            series_ticker=row["series_ticker"],
+            fee_type=row["fee_type"],
+            fee_multiplier=row["fee_multiplier"],
+            fetched_at=row["fetched_at"],
+        )
+
+    def save_odds(self, capture: OddsCapture, rows: list[OddsRow]) -> None:
+        """Record one capture and its rows in one transaction.
+
+        The capture row is written even when ``rows`` is empty, so a run
+        that found no moneylines still becomes the latest capture. A crash
+        mid-write leaves neither half behind.
+        """
+        with self.conn:
+            self.conn.execute(_UPSERT_CAPTURE, capture.as_tuple())
+            if rows:
+                self.conn.executemany(_UPSERT_ODDS, [row.as_tuple() for row in rows])
+
+    def latest_odds_capture(self, sport_key: str) -> tuple[str | None, list[sqlite3.Row]]:
+        """The newest capture for one sport: its timestamp and every row in it.
+
+        "Newest" comes from ``odds_captures``, so an empty capture returns
+        its timestamp with no rows rather than falling back to older odds.
+        """
+        latest = self.conn.execute(
+            "SELECT MAX(captured_at) FROM odds_captures WHERE sport_key = ?", (sport_key,)
+        ).fetchone()[0]
+        if latest is None:
+            return None, []
+        rows = self.conn.execute(
+            "SELECT * FROM sportsbook_odds WHERE sport_key = ? AND captured_at = ? "
+            "ORDER BY event_id, bookmaker, outcome",
+            (sport_key, latest),
+        ).fetchall()
+        return latest, rows
+
+    def latest_snapshots(self, series_ticker: str) -> tuple[str | None, list[sqlite3.Row]]:
+        """Quotes from the newest snapshot run of one series, joined to the market row.
+
+        Only the newest run: an edge is a comparison of two prices at about
+        the same time, and an older snapshot would be a comparison with the past.
+        """
+        latest = self.conn.execute(
+            "SELECT MAX(captured_at) FROM price_snapshots WHERE series_ticker = ?",
+            (series_ticker,),
+        ).fetchone()[0]
+        if latest is None:
+            return None, []
+        rows = self.conn.execute(
+            "SELECT s.ticker, s.captured_at, s.yes_ask_dollars, s.no_ask_dollars, "
+            "s.yes_bid_dollars, s.no_bid_dollars, s.status, "
+            "m.event_ticker, m.yes_sub_title, m.notional_value, m.result "
+            "FROM price_snapshots AS s JOIN markets AS m ON m.ticker = s.ticker "
+            "WHERE s.series_ticker = ? AND s.captured_at = ? ORDER BY s.ticker",
+            (series_ticker, latest),
+        ).fetchall()
+        return latest, rows
+
+    def save_line_matches(self, rows: list[tuple[str, str, str, str, int | None, str]]) -> None:
+        with self.conn:
+            self.conn.executemany(_UPSERT_MATCH, rows)
 
     def counts(self) -> dict[str, int]:
         def one(sql: str) -> int:

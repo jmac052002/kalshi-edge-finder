@@ -40,11 +40,11 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from kalshi_edge.client import DEFAULT_BASE_URL, KalshiAPIError, KalshiClient
-from kalshi_edge.parse import parse_market, parse_snapshot
+from kalshi_edge.parse import parse_market, parse_series_fee, parse_snapshot
 from kalshi_edge.store import MarketStore
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class RunStats:
 
 def utc_now() -> str:
     """UTC timestamp at one-second resolution, used as the snapshot key."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def normalize_series(items: Sequence[str]) -> list[str]:
@@ -163,6 +163,7 @@ def run(
     pages = 0
 
     for series_ticker in series:
+        refresh_series_fee(series_ticker, client=client, store=store, now=now)
         for job in jobs:
             label = "historical" if job["historical"] else str(job["status"])
             for page in client.iter_market_pages(
@@ -211,6 +212,25 @@ def run(
         snapshots_in_db=totals["snapshots"],
         with_result_in_db=totals["with_result"],
     )
+
+
+def refresh_series_fee(series_ticker: str, *, client: KalshiClient, store: MarketStore, now: str) -> None:
+    """Store the series' published fee schedule. A failure is logged, not fatal.
+
+    The comparison report needs this row to charge the right fee. Market
+    collection should not stop because one metadata call failed, so the
+    error is a warning and the report falls back to the published defaults
+    (and says so) until the next successful run.
+    """
+    try:
+        payload = client.get_series(series_ticker)
+    except KalshiAPIError as exc:
+        logger.warning("%s: could not refresh fee schedule: %s", series_ticker, exc)
+        return
+    fee = parse_series_fee(payload, series_ticker=series_ticker, fetched_at=now)
+    if fee.fee_type is None:
+        logger.warning("%s: series payload has no fee_type", series_ticker)
+    store.save_series_fee(fee)
 
 
 def format_stats(stats: RunStats, db_path: Path) -> str:

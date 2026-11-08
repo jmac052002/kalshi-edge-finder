@@ -41,3 +41,17 @@ def test_rejects_bad_inputs():
         taker_fee("1.5", 1)
     with pytest.raises(ValueError):
         taker_fee(-0.1, 1)
+
+
+def test_series_fee_uses_the_exchange_schedule():
+    from kalshi_edge.fees import UnknownFeeTypeError, series_fee
+
+    assert series_fee("0.45", 10, fee_type="quadratic", fee_multiplier="1") == Decimal("0.18")
+    assert series_fee("0.45", 10, fee_type="quadratic_with_maker_fees", fee_multiplier="1") == Decimal("0.18")
+    assert series_fee("0.45", 10, fee_type="quadratic", fee_multiplier="2") == Decimal("0.35")
+    # No stored row: published defaults, same as taker_fee.
+    assert series_fee("0.45", 10, fee_type=None, fee_multiplier=None) == taker_fee("0.45", 10)
+    with pytest.raises(UnknownFeeTypeError):
+        series_fee("0.45", 1, fee_type="flat", fee_multiplier="1")
+    with pytest.raises(ValueError):
+        series_fee("0.45", 1, fee_type="quadratic", fee_multiplier="-1")

@@ -241,6 +241,15 @@ class KalshiClient:
             raise KalshiAPIError(f"{path} 'candlesticks' was not a list")
         return candles
 
+    def get_series(self, series_ticker: str) -> dict:
+        """``GET /series/{ticker}``: the series metadata, including its fee schedule.
+
+        ``fee_type`` and ``fee_multiplier`` are what the exchange will
+        actually charge on this series. Reading them each run is how the
+        tool notices a schedule change instead of carrying a stale constant.
+        """
+        return self.get_json(f"/series/{quote(series_ticker, safe='')}")
+
     def _pace(self) -> None:
         if self.min_interval <= 0:
             return

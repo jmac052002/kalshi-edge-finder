@@ -46,7 +46,7 @@ import logging
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
@@ -115,7 +115,7 @@ def parse_timestamp(text: object) -> int | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return int(parsed.timestamp())
 
 
