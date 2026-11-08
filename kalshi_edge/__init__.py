@@ -1,10 +1,11 @@
-"""Public Kalshi market-data collector.
+"""kalshi-edge-finder: Kalshi market data, calibration, and sportsbook comparison.
 
-This package is step 1 of kalshi-edge-finder: read unauthenticated market
-data into a local SQLite file. Later steps (calibration, sportsbook
-comparison) are not implemented here.
+``collect`` reads unauthenticated Kalshi market data into SQLite, ``calibrate``
+backtests the pre-event prices against results, ``odds`` captures sportsbook
+moneylines from The Odds API, and ``compare`` puts the two side by side.
 
-No API keys are read or sent.
+Kalshi is read with no API key. The Odds API key is read from the
+``ODDS_API_KEY`` environment variable in ``kalshi_edge.odds.main`` only.
 """
 
 __version__ = "0.1.0"

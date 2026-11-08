@@ -1,1 +1,4 @@
 requests>=2.31
+# IANA time zone data for zoneinfo. Linux and macOS have it; Windows does not,
+# and the game matcher needs America/New_York.
+tzdata>=2024.1

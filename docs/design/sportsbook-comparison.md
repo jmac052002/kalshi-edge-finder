@@ -1,6 +1,9 @@
 # Design: sportsbook comparison, break-even, and expected value
 
-Status: proposal, not implemented. Covers README roadmap items 3 and 4
+Status: implemented (odds collector, matching, compare CLI, combo math as a
+library function). Kept as the record of why each choice was made; the README
+describes how to run it. Where this document and the code differ, the code and
+README win. Covered README roadmap items 3 and 4
 ("Sportsbook comparison" and "Parlays, break-even, and expected value").
 The calibration backtest (roadmap item 1) is being built separately and is
 out of scope here, except where the two need to share one fee module.

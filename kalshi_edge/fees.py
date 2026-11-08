@@ -62,3 +62,47 @@ def _as_decimal(price: float | str | Decimal) -> Decimal:
     # A float price came from a four-decimal API string; restore that form
     # rather than feeding its binary expansion (0.45000000000000001) in.
     return Decimal(f"{price:.4f}")
+
+
+# ``fee_type`` values Kalshi publishes on ``GET /series/{ticker}``. Both are
+# the same quadratic formula for a taker; the second also charges makers,
+# which this project never is (it always crosses the spread).
+QUADRATIC_FEE_TYPES = frozenset({"quadratic", "quadratic_with_maker_fees"})
+
+
+class UnknownFeeTypeError(ValueError):
+    """The exchange reported a fee schedule this module does not model.
+
+    Raised instead of guessing: a wrong fee silently turns every EV number
+    in a report into fiction, and a loud failure is a one-line fix here.
+    """
+
+
+def series_fee(
+    price: float | str | Decimal,
+    contracts: int = 1,
+    *,
+    fee_type: str | None,
+    fee_multiplier: str | Decimal | None,
+) -> Decimal:
+    """Taker fee using the schedule the exchange published for one series.
+
+    ``fee_type`` and ``fee_multiplier`` are the raw values from the series
+    payload (``kalshi_edge.collect`` stores them in ``series_fees``). ``None``
+    for either means the row was never fetched; the published defaults
+    (quadratic, multiplier 1) are used so a report can still be produced,
+    and callers should say so in their output.
+    """
+    if fee_type is not None and fee_type not in QUADRATIC_FEE_TYPES:
+        raise UnknownFeeTypeError(
+            f"fee_type {fee_type!r} is not one of {sorted(QUADRATIC_FEE_TYPES)}"
+        )
+    if fee_multiplier is None:
+        multiplier = Decimal(1)
+    else:
+        multiplier = (
+            fee_multiplier if isinstance(fee_multiplier, Decimal) else Decimal(str(fee_multiplier).strip())
+        )
+        if not multiplier.is_finite() or multiplier < 0:
+            raise ValueError(f"fee_multiplier must be a non-negative number, got {fee_multiplier!r}")
+    return taker_fee(price, contracts, multiplier=multiplier)
