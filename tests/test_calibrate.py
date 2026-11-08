@@ -9,6 +9,7 @@ import pytest
 
 from kalshi_edge.calibrate import (
     Observation,
+    Report,
     brier_score,
     bucket_edges,
     bucket_observations,
@@ -396,6 +397,10 @@ def test_wilson_interval():
     assert low == pytest.approx(0.342, abs=1e-3) and high == 1.0
     low, high = wilson_interval(0, 2)
     assert low == 0.0 and high == pytest.approx(0.658, abs=1e-3)
+    # All-YES and all-NO buckets must hit the bounds exactly, not a few ulps
+    # off, or the plot's error-bar lengths go negative (Codex finding on #7).
+    assert wilson_interval(6, 6)[1] == 1.0
+    assert wilson_interval(0, 11)[0] == 0.0
     with pytest.raises(ValueError):
         wilson_interval(3, 2)
 
@@ -499,6 +504,32 @@ def test_reliability_diagram_writes_png(store, tmp_path):
     out = tmp_path / "calibration.png"
     write_reliability_diagram(report, out)
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_reliability_diagram_handles_all_yes_and_all_no_buckets(tmp_path):
+    pytest.importorskip("matplotlib")
+    observations = [_obs(0.85, 1.0, ticker=f"y{i}") for i in range(6)]
+    observations += [_obs(0.15, 0.0, ticker=f"n{i}") for i in range(11)]
+    buckets = bucket_observations(observations, bucket_edges(10))
+    report = Report(
+        series="KXNFLGAME",
+        settled=17,
+        with_quote=17,
+        observations=17,
+        one_per_event=True,
+        contracts=1,
+        cutoff_sources={},
+        skipped={},
+        fetched=0,
+        cached=17,
+        buckets=buckets,
+        brier=0.1,
+        base_rate=6 / 17,
+        base_rate_brier=0.2,
+    )
+    out = tmp_path / "edges.png"
+    write_reliability_diagram(report, out)
+    assert out.exists()
 
 
 def test_plot_without_matplotlib_is_a_clear_error(store, tmp_path, monkeypatch):

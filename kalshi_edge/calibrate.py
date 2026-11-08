@@ -394,7 +394,13 @@ def wilson_interval(successes: float, n: int, *, z: float = 1.96) -> tuple[float
     denominator = 1 + z2 / n
     center = (p + z2 / (2 * n)) / denominator
     half = z * sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denominator
-    return max(0.0, center - half), min(1.0, center + half)
+    # An all-NO bucket's lower bound and an all-YES bucket's upper bound are
+    # exactly 0 and 1 by construction; the float arithmetic lands a few ulps
+    # off (6 of 6 gives 0.9999999999999999), which later becomes a negative
+    # error-bar length. Pin them.
+    low = 0.0 if successes == 0 else max(0.0, center - half)
+    high = 1.0 if successes == n else min(1.0, center + half)
+    return low, high
 
 
 def bucket_edges(count: int) -> list[float]:
@@ -582,8 +588,9 @@ def write_reliability_diagram(report: Report, path: Path) -> None:
     if populated:
         xs = [b.predicted for b in populated]
         ys = [b.actual for b in populated]
-        lower = [b.actual - (b.actual_low or b.actual) for b in populated]
-        upper = [(b.actual_high or b.actual) - b.actual for b in populated]
+        # Error-bar lengths; clamped because matplotlib rejects a negative yerr.
+        lower = [max(0.0, b.actual - (b.actual_low if b.actual_low is not None else b.actual)) for b in populated]
+        upper = [max(0.0, (b.actual_high if b.actual_high is not None else b.actual) - b.actual) for b in populated]
         largest = max(b.count for b in populated)
         sizes = [20 + 180 * b.count / largest for b in populated]
         ax.errorbar(xs, ys, yerr=[lower, upper], fmt="none", ecolor="tab:blue", capsize=3, linewidth=1)
