@@ -1,0 +1,113 @@
+{
+  "ticker": "KXNFLGAME-26NOV08CINATL-CIN",
+  "candlesticks": [
+    {
+      "end_period_ts": 1794150000,
+      "yes_bid": {
+        "open_dollars": "0.4000",
+        "low_dollars": "0.3900",
+        "high_dollars": "0.4100",
+        "close_dollars": "0.4000"
+      },
+      "yes_ask": {
+        "open_dollars": "0.4300",
+        "low_dollars": "0.4200",
+        "high_dollars": "0.4400",
+        "close_dollars": "0.4400"
+      },
+      "price": {
+        "open_dollars": "0.4100",
+        "low_dollars": "0.4000",
+        "high_dollars": "0.4300",
+        "close_dollars": "0.4200",
+        "mean_dollars": "0.4150",
+        "previous_dollars": "0.4000",
+        "min_dollars": "0.4000",
+        "max_dollars": "0.4300"
+      },
+      "volume_fp": "120.00",
+      "open_interest_fp": "900.00"
+    },
+    {
+      "end_period_ts": 1794153600,
+      "yes_bid": {
+        "open_dollars": "0.4000",
+        "low_dollars": "0.4000",
+        "high_dollars": "0.4200",
+        "close_dollars": "0.4200"
+      },
+      "yes_ask": {
+        "open_dollars": "0.4400",
+        "low_dollars": "0.4400",
+        "high_dollars": "0.4600",
+        "close_dollars": "0.4600"
+      },
+      "price": {
+        "open_dollars": "0.4200",
+        "low_dollars": "0.4200",
+        "high_dollars": "0.4400",
+        "close_dollars": "0.4400",
+        "mean_dollars": "0.4300",
+        "previous_dollars": "0.4200",
+        "min_dollars": "0.4200",
+        "max_dollars": "0.4400"
+      },
+      "volume_fp": "80.00",
+      "open_interest_fp": "950.00"
+    },
+    {
+      "end_period_ts": 1794157200,
+      "yes_bid": {
+        "open_dollars": null,
+        "low_dollars": null,
+        "high_dollars": null,
+        "close_dollars": null
+      },
+      "yes_ask": {
+        "open_dollars": "0.4500",
+        "low_dollars": "0.4500",
+        "high_dollars": "0.4500",
+        "close_dollars": "0.4500"
+      },
+      "price": {
+        "open_dollars": null,
+        "low_dollars": null,
+        "high_dollars": null,
+        "close_dollars": null,
+        "mean_dollars": null,
+        "previous_dollars": "0.4400",
+        "min_dollars": null,
+        "max_dollars": null
+      },
+      "volume_fp": "0.00",
+      "open_interest_fp": "950.00"
+    },
+    {
+      "end_period_ts": 1794164400,
+      "yes_bid": {
+        "open_dollars": "0.8000",
+        "low_dollars": "0.8000",
+        "high_dollars": "0.9500",
+        "close_dollars": "0.9500"
+      },
+      "yes_ask": {
+        "open_dollars": "0.8200",
+        "low_dollars": "0.8200",
+        "high_dollars": "0.9700",
+        "close_dollars": "0.9700"
+      },
+      "price": {
+        "open_dollars": "0.8100",
+        "low_dollars": "0.8100",
+        "high_dollars": "0.9600",
+        "close_dollars": "0.9600",
+        "mean_dollars": "0.9000",
+        "previous_dollars": "0.4400",
+        "min_dollars": "0.8100",
+        "max_dollars": "0.9600"
+      },
+      "volume_fp": "500.00",
+      "open_interest_fp": "1200.00"
+    }
+  ]
+}

@@ -21,6 +21,7 @@ import random
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -201,6 +202,44 @@ class KalshiClient:
         raise KalshiAPIError(
             f"{path} for {series_ticker} did not end after {max_pages} pages"
         )
+
+    def get_candlesticks(
+        self,
+        *,
+        series_ticker: str,
+        ticker: str,
+        start_ts: int,
+        end_ts: int,
+        period_interval: int = 60,
+    ) -> list[dict]:
+        """Return the raw candlesticks for one market between two Unix times.
+
+        ``GET /series/{series}/markets/{ticker}/candlesticks`` is the public
+        price history. Each candle carries the open/high/low/close of the
+        yes bid, the yes ask, and the trade price for one period, keyed by
+        the Unix second the period ended. ``period_interval`` is in minutes
+        and the server only accepts 1, 60, or 1440.
+
+        The server includes candles ending on or after ``start_ts`` and on or
+        before ``end_ts``, so a candle whose ``end_period_ts`` is at or before
+        the cutoff was entirely formed before it. That is what makes this a
+        pre-event price and not a lookahead.
+        """
+        if period_interval not in (1, 60, 1440):
+            raise ValueError("period_interval must be 1, 60, or 1440 minutes")
+        if end_ts < start_ts:
+            raise ValueError("end_ts must be >= start_ts")
+        # Tickers come from our own database. Quoting keeps a malformed one
+        # from turning into extra path segments instead of a clean 404.
+        path = f"/series/{quote(series_ticker, safe='')}/markets/{quote(ticker, safe='')}/candlesticks"
+        payload = self.get_json(
+            path,
+            {"start_ts": int(start_ts), "end_ts": int(end_ts), "period_interval": period_interval},
+        )
+        candles = payload.get("candlesticks") or []
+        if not isinstance(candles, list):
+            raise KalshiAPIError(f"{path} 'candlesticks' was not a list")
+        return candles
 
     def _pace(self) -> None:
         if self.min_interval <= 0:
