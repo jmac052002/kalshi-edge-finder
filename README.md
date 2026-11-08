@@ -45,13 +45,13 @@ Every run also reads `GET /series/{ticker}` once per series and stores its `fee_
 
 **One contract per game.** A game-winner event lists both teams, and "A wins" is "B loses". Counting both doubles the sample without adding information, so by default the lowest ticker in each event is kept (ticker order is by team abbreviation, which does not know who was favored). `--all-contracts` keeps both sides.
 
-**What is reported.** For each probability bucket (default ten of 10%): the number of contracts, the mean midpoint, the realized YES rate, and the fee-adjusted return of buying each side at the ask and holding to settlement. The Brier score (mean squared error of the midpoint against the 0/1 outcome, lower is better) summarizes the series, next to the Brier score of a constant forecast at the base rate as the floor a forecast with no game-specific information would reach.
+**What is reported.** For each probability bucket (default ten of 10%): the number of contracts, the mean midpoint, the realized YES rate with a Wilson 95% interval, and the fee-adjusted return of buying each side at the ask and holding to settlement. The interval is the point of the table: a bucket priced at 65% that resolved YES 57% of the time looks like a mispricing, but if the interval runs 49%..64% on 160 games the miss is a couple of standard errors, and on 12 games it is noise. Wilson is used instead of the usual `p ± 1.96·√(p(1−p)/n)` because that formula collapses to zero width when a bucket is all YES or all NO and overshoots 0 or 1 near the edges. The interval assumes independent outcomes, which holds with one contract per game and not with `--all-contracts`. The Brier score (mean squared error of the midpoint against the 0/1 outcome, lower is better) summarizes the series, next to the Brier score of a constant forecast at the base rate as the floor a forecast with no game-specific information would reach.
 
 **Fees.** Kalshi's taker fee is `round_up(0.07 × C × P × (1 − P))` per order, rounded up to the cent ([fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf)). There is no settlement fee. `P(1 − P)` peaks at 50 cents, so the middle of the board is the most expensive place to trade and that is where "calibrated but unprofitable" shows up. The ROI columns pay the fee on every purchase, at `--contracts` contracts per market (default 1; rounding up per order makes single contracts slightly pessimistic, which is the right direction to be wrong in).
 
 **What the numbers do not say.** The ROI is for one contract per market. A multi-leg parlay multiplies its legs: if each leg is fairly priced and costs a fee, the combination's expected return is the product of each leg's (negative) expected return, which is worse, not better, than the legs alone. Nothing in this table turns a long-shot combo into a positive-expectation bet.
 
-Pre-event quotes are cached in the `pre_event_prices` table, one request per market on the first run and none after. A cached row is reused only when it answers the window being asked for: change `--lead-hours`, `--event-hours`, or `--lookback-hours`, or collect a new event time, and the affected markets are fetched again rather than served a quote from the wrong moment. `--refresh` throws the whole cache away. `--max-fetch N` caps the number of candlestick requests, for a quick first look at a big series.
+Pre-event quotes are cached in the `pre_event_prices` table, one request per market on the first run and none after. A cached row is reused only when it answers the window being asked for: change `--lead-hours`, `--event-hours`, or `--lookback-hours`, or collect a new event time, and the affected markets are fetched again rather than served a quote from the wrong moment. `--refresh` throws the whole cache away. `--max-fetch N` caps the number of candlestick requests, for a quick first look at a big series. `--plot calibration.png` also writes a reliability diagram (realized rate against predicted, one point per bucket with its interval as an error bar, sized by count); it needs matplotlib, which is kept out of the main requirements: `pip install -r requirements-plot.txt`.
 
 ### Sportsbook comparison
 
@@ -137,7 +137,8 @@ Python 3.11 or newer. From the repository root:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -r requirements-dev.txt   # pytest, only for tests
+pip install -r requirements-dev.txt   # pytest and ruff, only for tests
+pip install -r requirements-plot.txt  # matplotlib, only for calibrate --plot
 ```
 
 On Windows, WSL works the same way; make the virtual environment inside the shell you will run from, because a Windows `.venv` cannot be used from WSL or the other way round (`.venv*` is gitignored, so a second one such as `.venv-wsl` is fine).

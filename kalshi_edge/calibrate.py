@@ -22,7 +22,8 @@ Steps, each a function below so it can be tested on its own:
    because a game-winner event lists both teams, and "A wins" and "B wins"
    are one coin, not two.
 5. Bucket by probability, and report count, mean predicted probability,
-   realized YES rate, and fee-adjusted ROI of buying each side at the ask.
+   realized YES rate with a Wilson 95% interval, and fee-adjusted ROI of
+   buying each side at the ask.
    The Brier score summarizes the whole series; the score of a constant
    forecast at the base rate is printed next to it as a sanity floor.
 
@@ -49,6 +50,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from itertools import pairwise
+from math import sqrt
 from pathlib import Path
 from sqlite3 import Row
 
@@ -83,6 +85,8 @@ class Bucket:
     count: int
     predicted: float | None  # mean midpoint
     actual: float | None  # realized YES rate
+    actual_low: float | None  # Wilson 95% interval around the YES rate
+    actual_high: float | None
     yes_roi: float | None  # fee-adjusted return of buying YES at the ask
     no_roi: float | None  # fee-adjusted return of buying NO at the ask
 
@@ -369,6 +373,30 @@ def side_roi(prices_and_payoffs: Sequence[tuple[float, float]], contracts: int) 
     return float((payoff - cost) / cost)
 
 
+def wilson_interval(successes: float, n: int, *, z: float = 1.96) -> tuple[float, float] | None:
+    """Wilson score interval for a binomial proportion.
+
+    The textbook ``p +/- z * sqrt(p(1-p)/n)`` collapses to zero width when a
+    bucket is all YES or all NO, and runs past 0 or 1 near the edges. Wilson
+    keeps the interval inside ``[0, 1]`` and stays honest at small ``n``:
+    two contracts that both resolved YES get ``34%..100%``, not ``100%..100%``.
+
+    The interval treats the outcomes as independent. With one contract per
+    event (the default) they are; with ``--all-contracts`` each game appears
+    twice and the printed interval is narrower than the truth.
+    """
+    if n <= 0:
+        return None
+    if not 0 <= successes <= n:
+        raise ValueError("successes must be between 0 and n")
+    p = successes / n
+    z2 = z * z
+    denominator = 1 + z2 / n
+    center = (p + z2 / (2 * n)) / denominator
+    half = z * sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denominator
+    return max(0.0, center - half), min(1.0, center + half)
+
+
 def bucket_edges(count: int) -> list[float]:
     if count < 1:
         raise ValueError("bucket count must be >= 1")
@@ -402,13 +430,17 @@ def bucket_observations(
     buckets = []
     for i, group in enumerate(groups):
         n = len(group)
+        successes = sum(o.outcome for o in group)
+        interval = wilson_interval(successes, n)
         buckets.append(
             Bucket(
                 lower=edges[i],
                 upper=edges[i + 1],
                 count=n,
                 predicted=sum(o.probability for o in group) / n if n else None,
-                actual=sum(o.outcome for o in group) / n if n else None,
+                actual=successes / n if n else None,
+                actual_low=interval[0] if interval else None,
+                actual_high=interval[1] if interval else None,
                 yes_roi=side_roi([(o.yes_ask, o.outcome) for o in group], contracts),
                 no_roi=side_roi([(o.no_ask, 1.0 - o.outcome) for o in group], contracts),
             )
@@ -510,14 +542,15 @@ def format_report(report: Report) -> str:
         ),
         "",
         (
-            f"{'bucket':>9}  {'n':>5}  {'predicted':>9}  {'actual':>8}  "
+            f"{'bucket':>9}  {'n':>5}  {'predicted':>9}  {'actual':>8}  {'95% CI':>15}  "
             f"{'yes ROI':>8}  {'no ROI':>8}   (buy at ask, taker fee, {report.contracts} contract(s))"
         ),
     ]
     for b in report.buckets:
         label = f"{b.lower * 100:.0f}-{b.upper * 100:.0f}%"
+        interval = "-" if b.actual_low is None else f"{_pct(b.actual_low)}..{_pct(b.actual_high)}"
         lines.append(
-            f"{label:>9}  {b.count:>5}  {_pct(b.predicted):>9}  {_pct(b.actual):>8}  "
+            f"{label:>9}  {b.count:>5}  {_pct(b.predicted):>9}  {_pct(b.actual):>8}  {interval:>15}  "
             f"{_pct(b.yes_roi, signed=True):>8}  {_pct(b.no_roi, signed=True):>8}"
         )
     return "\n".join(lines)
@@ -525,6 +558,49 @@ def format_report(report: Report) -> str:
 
 def report_to_json(report: Report) -> str:
     return json.dumps(asdict(report), indent=2, sort_keys=True)
+
+
+def write_reliability_diagram(report: Report, path: Path) -> None:
+    """Write a reliability diagram: realized YES rate against mean predicted.
+
+    A calibrated market sits on the diagonal. Each point carries its Wilson
+    interval as an error bar and is sized by the bucket's count, so an
+    off-diagonal point with two contracts does not look like a finding.
+    matplotlib is imported here, not at the top, so the backtest itself
+    needs nothing beyond the standard library and requests.
+    """
+    try:
+        import matplotlib
+    except ImportError as exc:  # pragma: no cover - exercised via a fake module in tests
+        raise RuntimeError("--plot needs matplotlib: pip install -r requirements-plot.txt") from exc
+    matplotlib.use("Agg")  # file output only; never try to open a window
+    import matplotlib.pyplot as plt
+
+    populated = [b for b in report.buckets if b.count and b.predicted is not None and b.actual is not None]
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot([0, 1], [0, 1], linestyle="--", color="grey", linewidth=1, label="perfect calibration")
+    if populated:
+        xs = [b.predicted for b in populated]
+        ys = [b.actual for b in populated]
+        lower = [b.actual - (b.actual_low or b.actual) for b in populated]
+        upper = [(b.actual_high or b.actual) - b.actual for b in populated]
+        largest = max(b.count for b in populated)
+        sizes = [20 + 180 * b.count / largest for b in populated]
+        ax.errorbar(xs, ys, yerr=[lower, upper], fmt="none", ecolor="tab:blue", capsize=3, linewidth=1)
+        ax.scatter(xs, ys, s=sizes, color="tab:blue", zorder=3, label="bucket (size = count)")
+        for b, x, y in zip(populated, xs, ys, strict=True):
+            ax.annotate(str(b.count), (x, y), textcoords="offset points", xytext=(6, 6), fontsize=8)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("mean pre-event price (midpoint)")
+    ax.set_ylabel("realized YES rate (Wilson 95% interval)")
+    brier = "-" if report.brier is None else f"{report.brier:.4f}"
+    ax.set_title(f"{report.series}: {report.observations} contracts, Brier {brier}")
+    ax.legend(loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -589,6 +665,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--max-fetch", type=int, help="Stop after this many candlestick requests (for a quick first look)."
     )
     parser.add_argument("--json", type=Path, help="Also write the report as JSON to this path.")
+    parser.add_argument(
+        "--plot", type=Path, help="Also write a reliability diagram (PNG) to this path. Needs matplotlib."
+    )
     parser.add_argument(
         "--min-interval", type=float, default=0.25, help="Seconds between requests (default: 0.25)."
     )
@@ -664,6 +743,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json is not None:
         args.json.write_text(report_to_json(report), encoding="utf-8")
         logger.info("wrote %s", args.json)
+    if args.plot is not None:
+        try:
+            write_reliability_diagram(report, args.plot)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        logger.info("wrote %s", args.plot)
     return 0
 
 
