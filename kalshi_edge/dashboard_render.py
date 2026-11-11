@@ -539,9 +539,11 @@ def render_scan(scan: Mapping[str, object] | None, data: DashboardData) -> str:
         caution = (
             f'<p class="banner warn">{large:,} of the {clears:,} clearing sides show an edge over '
             f"{LARGE_EDGE * 100:.0f} pp. A gap that large against a book people are trading usually means the model "
-            "is missing something the market knows, not that the market is wrong. Weather edges here rest on an "
-            "assumed forecast error that has not been fit to settlements. Read them as disagreements to "
-            "investigate, not as money on the table.</p>"
+            "is missing something the market knows, not that the market is wrong. Weather edges here use a bias "
+            "and width fit to settled CLI highs against an Open-Meteo GFS previous-day forecast, a Student-t "
+            "applied to the live NWS high. That is not an NWS error: api.weather.gov has no forecast archive. "
+            "Gaps at least as large as the scan's disagree guard are flagged VERIFY and do not clear. "
+            "Read a large clearing edge as a disagreement to investigate, not as money on the table.</p>"
         )
     facts = (
         f'<ul class="facts"><li><b>Run</b> {esc(fmt_time(scan.get("generated_at"), data.tz))}</li>'
