@@ -384,6 +384,45 @@ def test_times_are_shown_in_the_chosen_zone():
     assert fmt_time("garbage", CHICAGO) == "–"
 
 
+def test_scan_settlement_times_follow_the_selected_zone():
+    """A non-Chicago --tz must not leave the report's preformatted Chicago string on screen."""
+    report = json.loads(scan.report_to_json(_scan_report()))
+    utc = render_page(DashboardData(built_at=BUILT, tz=ZoneInfo("UTC"), scan=report))
+    assert "Mon Nov 9, 8:00 PM UTC" in utc
+    assert "Thu Nov 12, 1:30 PM UTC" in utc
+    assert "Tue Nov 10, 3:00 PM UTC" in utc
+    assert "CST" not in utc
+    # The column sorts on the raw instant, not the formatted text.
+    assert 'data-v="2026-11-09T20:00:00Z"' in utc
+    assert 'data-v="2026-11-10T15:00:00Z"' in utc
+
+    chicago = render_page(DashboardData(built_at=BUILT, tz=CHICAGO, scan=report))
+    assert "Mon Nov 9, 2:00 PM CST" in chicago
+    assert "Thu Nov 12, 7:30 AM CST" in chicago
+    assert "Tue Nov 10, 9:00 AM CST" in chicago
+    assert "2026-11-09 14:00 CST" not in chicago
+
+
+def test_scan_settlement_time_falls_back_when_the_instant_is_unusable():
+    page = _page(
+        scan={
+            "modeled": [
+                {
+                    "title": "kept chicago",
+                    "clears": True,
+                    "settles_at": "not a time",
+                    "settles_chicago": "2026-11-09 14:00 CST",
+                }
+            ],
+            "econ_events": [{"label": "release", "settles_chicago": "2026-11-12 07:30 CST"}],
+            "short_dated": [{"title": "no time at all", "ticker": "NONE"}],
+        }
+    )
+    assert 'data-v="not a time">2026-11-09 14:00 CST' in page
+    assert "2026-11-12 07:30 CST" in page
+    assert '<td data-v="">–</td>' in page
+
+
 def test_a_stale_gap_between_captures_is_flagged(paths):
     compared = json.loads(paths["compare"].read_text())
     compared["stale"] = True

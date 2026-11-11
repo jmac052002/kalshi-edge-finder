@@ -225,6 +225,27 @@ def fmt_time(value: object, tz: ZoneInfo) -> str:
     return f"{local:%a %b} {local.day}, {hour}:{local:%M} {half} {local:%Z}"
 
 
+def fmt_settles(entry: Mapping[str, object], tz: ZoneInfo) -> str:
+    """Settlement time in ``tz``, else the report's Chicago string, else a dash.
+
+    ``settles_at`` is the instant. ``settles_chicago`` is already written for
+    one zone, so it is only a fallback when that instant is missing or
+    unreadable. The caller still runs the result through ``esc``.
+    """
+    shown = fmt_time(entry.get("settles_at"), tz)
+    if shown != DASH:
+        return shown
+    fallback = entry.get("settles_chicago")
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback
+    return DASH
+
+
+def settles_cell(entry: Mapping[str, object], tz: ZoneInfo) -> str:
+    """Visible time in ``tz``. ``data-v`` stays the raw instant so the column sorts."""
+    return f'<td data-v="{esc(entry.get("settles_at"))}">{esc(fmt_settles(entry, tz))}</td>'
+
+
 def fmt_age(hours: float) -> str:
     if hours < 1:
         return f"{max(1, round(hours * 60))} min"
@@ -366,7 +387,7 @@ def _scan_order(row: Mapping[str, object]) -> tuple[int, float]:
     return (0 if row.get("clears") is True else 1, -(edge if edge is not None else -math.inf))
 
 
-def render_modeled(rows: Sequence[Mapping[str, object]]) -> str:
+def render_modeled(rows: Sequence[Mapping[str, object]], tz: ZoneInfo) -> str:
     if not rows:
         return empty("The scan priced no contract against a model this run.")
     ordered = sorted(rows, key=_scan_order)
@@ -388,7 +409,7 @@ def render_modeled(rows: Sequence[Mapping[str, object]]) -> str:
             f"{num_cell(row.get('break_even'), fmt_pct(row.get('break_even')))}"
             f"{edge_cell(row.get('edge'), scale)}"
             f"{num_cell(row.get('contracts'), fmt_int(row.get('contracts')))}"
-            f'<td data-v="{esc(row.get("settles_at"))}">{esc(row.get("settles_chicago"))}</td>'
+            f"{settles_cell(row, tz)}"
             f"<td>{tags_html(flags)}</td></tr>"
         )
     options = "".join(f'<option value="{esc(kind)}">{esc(kind)}</option>' for kind in kinds)
@@ -422,7 +443,7 @@ def render_modeled(rows: Sequence[Mapping[str, object]]) -> str:
     )
 
 
-def render_econ(events: Sequence[Mapping[str, object]]) -> str:
+def render_econ(events: Sequence[Mapping[str, object]], tz: ZoneInfo) -> str:
     if not events:
         return empty("No open economic-release markets were listed this run.")
     cards: list[str] = []
@@ -445,7 +466,7 @@ def render_econ(events: Sequence[Mapping[str, object]]) -> str:
         horizon = "" if event.get("within_horizon") is True else ' <span class="tag">PAST HORIZON</span>'
         cards.append(
             f'<div class="event"><h4>{esc(event.get("label"))}{horizon}</h4>'
-            f'<p class="small muted">{esc(event.get("settles_chicago"))} &middot; '
+            f'<p class="small muted">{esc(fmt_settles(event, tz))} &middot; '
             f"{esc(fmt_int(event.get('market_count')))} markets "
             f'&middot; <span class="tick">{esc(event.get("event_ticker"))}</span></p>'
             f'<p class="small">{esc(event.get("summary"))}</p>{table}</div>'
@@ -453,7 +474,7 @@ def render_econ(events: Sequence[Mapping[str, object]]) -> str:
     return f'<div class="events">{"".join(cards)}</div>'
 
 
-def render_short(rows: Sequence[Mapping[str, object]], total: object, omitted: object) -> str:
+def render_short(rows: Sequence[Mapping[str, object]], total: object, omitted: object, tz: ZoneInfo) -> str:
     if not rows:
         return empty("No short-dated markets in the chosen categories this run.")
     body = "".join(
@@ -462,7 +483,7 @@ def render_short(rows: Sequence[Mapping[str, object]], total: object, omitted: o
         f"{num_cell(row.get('no_ask'), fmt_money(row.get('no_ask')))}"
         f"{num_cell(row.get('volume_24h'), fmt_int(row.get('volume_24h')))}"
         f"{num_cell(row.get('open_interest'), fmt_int(row.get('open_interest')))}"
-        f'<td data-v="{esc(row.get("settles_at"))}">{esc(row.get("settles_chicago"))}</td>'
+        f"{settles_cell(row, tz)}"
         f"<td>{tags_html(row.get('flags'))}</td></tr>"
         for row in rows
     )
@@ -527,16 +548,21 @@ def render_scan(scan: Mapping[str, object] | None, data: DashboardData) -> str:
         f"<li><b>Order size</b> {esc(fmt_money(scan.get('budget')))}</li>"
         f"<li><b>Horizon</b> {esc(fmt_int(scan.get('horizon_days')))} days</li></ul>"
     )
+    short = render_short(
+        [as_dict(row) for row in as_list(scan.get("short_dated"))],
+        scan.get("short_dated_total"),
+        scan.get("short_dated_omitted"),
+        data.tz,
+    )
     return (
         '<section class="card" id="scan"><h2>Non-sports scan</h2>'
         f"<p>{esc(verdict)}</p>{facts}{caution}"
         f"{bullet_details('Notes from this run', scan.get('notes'))}"
         f"{bullet_details('Read this honestly', scan.get('caveats'))}"
-        f"<h3>Modeled contracts: weather and CPI</h3>{render_modeled(modeled)}"
+        f"<h3>Modeled contracts: weather and CPI</h3>{render_modeled(modeled, data.tz)}"
         "<h3>Economic releases</h3>"
-        f"{render_econ([as_dict(e) for e in as_list(scan.get('econ_events'))])}"
-        "<h3>Short-dated markets</h3>"
-        f"{render_short([as_dict(r) for r in as_list(scan.get('short_dated'))], scan.get('short_dated_total'), scan.get('short_dated_omitted'))}"
+        f"{render_econ([as_dict(event) for event in as_list(scan.get('econ_events'))], data.tz)}"
+        f"<h3>Short-dated markets</h3>{short}"
         "</section>"
     )
 
