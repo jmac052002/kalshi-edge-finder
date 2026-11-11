@@ -9,6 +9,7 @@ from kalshi_edge.odds_math import contracts_for_budget, evaluate
 from kalshi_edge.scan import event_year_month, format_chicago, format_report, report_to_json, run
 from kalshi_edge.store import MarketStore
 from kalshi_edge.weather import assumed_sigma_f, temperature_yes_probability
+from kalshi_edge.weather_error import constant_calibration, unfitted_calibration
 
 NOW = datetime(2026, 11, 11, 15, 0, tzinfo=UTC)
 GENERATED = "2026-11-11T15:00:00Z"
@@ -230,7 +231,16 @@ def _world(*, yes_ask, no_ask, high):
     return FakeKalshi(series, markets, events), FakeForecasts(high)
 
 
-def _run(tmp_path, *, yes_ask, no_ask, high):
+def _pinned_calibration():
+    """Bias 0 and the old 3-hour width, with the guard wide open.
+
+    The break-even assertions below are about fees, not about the fitted file.
+    """
+    sigma = assumed_sigma_f(3)
+    return constant_calibration(bias_f=0.0, scale_f=sigma, extra_margin=0.0, disagree_gap=1.0)
+
+
+def _run(tmp_path, *, yes_ask, no_ask, high, calibration=None):
     client, forecasts = _world(yes_ask=yes_ask, no_ask=no_ask, high=high)
     with MarketStore(tmp_path / "kalshi.db") as store:
         report = run(
@@ -239,6 +249,7 @@ def _run(tmp_path, *, yes_ask, no_ask, high):
             now=NOW,
             generated_at=GENERATED,
             forecasts=forecasts,
+            calibration=_pinned_calibration() if calibration is None else calibration,
             month_charts=[],
             year_charts=[],
             budget=Decimal(10),
@@ -266,9 +277,15 @@ def test_nothing_clears_when_the_ask_is_richer_than_the_model(tmp_path):
     yes = next(row for row in report.modeled if row.side == "YES")
     assert yes.model == pytest_approx(expected)
     assert yes.clears is False
-    assert "assumed sd" in yes.why
-    assert "not fit to settlements" in yes.why
+    assert f"sd {sigma:.1f}F" in yes.why
+    assert "bias +0.0F" in yes.why
     assert "KNYC" in yes.why
+    with MarketStore(tmp_path / "kalshi.db") as store:
+        stored = store.nws_forecasts()
+    assert len(stored) == 1
+    assert stored[0]["station_id"] == "KNYC"
+    assert stored[0]["forecast_high_f"] == 61
+    assert stored[0]["market_date"] == "2026-11-11"
     assert yes.settles_chicago == "2026-11-12 14:00 CST"
     # Break-even is the ask plus the taker fee on the $10 order, from the stored schedule.
     assert fee is not None and fee.fee_type == "quadratic"
@@ -330,6 +347,57 @@ def test_no_forecast_means_no_weather_edge(tmp_path):
     assert report.nothing_clears
     assert any("no remaining afternoon" in note for note in report.notes)
     assert "nothing clears costs today" in format_report(report).splitlines()
+
+
+def test_a_large_weather_gap_is_not_ranked(tmp_path):
+    sigma = assumed_sigma_f(3)
+    calibration = constant_calibration(
+        bias_f=0.0, scale_f=sigma, extra_margin=0.03, disagree_gap=0.15
+    )
+    report, _client, _forecasts, _fee, _snapshots = _run(
+        tmp_path, yes_ask="0.0500", no_ask="0.9900", high=_high(), calibration=calibration
+    )
+    yes = next(row for row in report.modeled if row.side == "YES")
+    assert yes.clears is False
+    assert "VERIFY" in yes.flags
+    assert "model disagrees strongly, verify" in yes.why
+    assert report.clears == []
+    text = format_report(report)
+    assert "model disagrees strongly, verify" in text
+    assert "nothing clears costs today" in text.splitlines()
+
+
+def test_unfitted_weather_is_not_an_edge(tmp_path):
+    report, _client, _forecasts, _fee, _snapshots = _run(
+        tmp_path,
+        yes_ask="0.0500",
+        no_ask="0.9900",
+        high=_high(),
+        calibration=unfitted_calibration(),
+    )
+    yes = next(row for row in report.modeled if row.side == "YES")
+    assert yes.clears is False
+    assert "VERIFY" in yes.flags
+    assert "assumed sd" in yes.why
+    assert "not ranked as an edge" in yes.why
+    assert report.nothing_clears
+
+
+def test_extra_margin_blocks_a_tiny_weather_edge(tmp_path):
+    sigma = assumed_sigma_f(3)
+    probability = temperature_yes_probability(61, sigma, strike_type="between", floor=60, cap=61)
+    # Far enough under the model to beat the fee, and inside the extra margin.
+    ask = f"{max(0.01, probability - 0.04):.4f}"
+    calibration = constant_calibration(
+        bias_f=0.0, scale_f=sigma, extra_margin=0.03, disagree_gap=0.50
+    )
+    report, _client, _forecasts, _fee, _snapshots = _run(
+        tmp_path, yes_ask=ask, no_ask="0.9900", high=_high(), calibration=calibration
+    )
+    yes = next(row for row in report.modeled if row.side == "YES")
+    assert yes.model > yes.break_even
+    assert yes.clears is False
+    assert "VERIFY" not in yes.flags
 
 
 def test_chicago_settlement_time():

@@ -20,6 +20,13 @@ Two tables, on purpose:
   publishes per series. ``line_matches`` records which sportsbook game each
   Kalshi event was tied to, so a wrong match can be traced.
 
+* ``nws_forecasts`` is one row per daily-high event per scan: the NWS hourly
+  max the scan priced, stored so a later weather fit can use the forecast
+  the scan actually read. ``weather_days`` and ``archive_forecasts`` are the
+  settled highs and the archived model highs ``weather_calibrate`` paired.
+  ``weather_brackets`` is the settled ladder for the contracts whose
+  pre-noon quote was scored. None of these tables place an order.
+
 The primary keys make writes idempotent. Inserting the same market twice
 updates it. Inserting the same (ticker, captured_at) snapshot twice updates
 it. Nothing here deletes a row, so a second settled run cannot wipe a
@@ -44,7 +51,7 @@ from typing import Self
 from kalshi_edge.parse import ParsedMarket, PreEventPrice, PriceSnapshot, SeriesFee
 from kalshi_edge.sportsbook.parse import OddsCapture, OddsRow
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -199,6 +206,64 @@ CREATE INDEX IF NOT EXISTS idx_pre_event_series
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_series_time
     ON price_snapshots (series_ticker, captured_at);
+
+-- One NWS hourly-max per event per scan. captured_at is the scan's UTC
+-- timestamp. lead_hours is how far ahead that high hour was. Later fits
+-- read this instead of guessing what the grid used to say.
+CREATE TABLE IF NOT EXISTS nws_forecasts (
+    event_ticker TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    series_ticker TEXT NOT NULL,
+    station_id TEXT NOT NULL,
+    market_date TEXT NOT NULL,
+    forecast_high_f REAL NOT NULL,
+    lead_hours REAL NOT NULL,
+    valid_time TEXT,
+    station_name TEXT,
+    source TEXT NOT NULL,
+    PRIMARY KEY (event_ticker, captured_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nws_forecasts_station_date
+    ON nws_forecasts (station_id, market_date);
+
+-- One settled daily high per event, from expiration_value or the winning bin.
+CREATE TABLE IF NOT EXISTS weather_days (
+    event_ticker TEXT PRIMARY KEY,
+    series_ticker TEXT NOT NULL,
+    station_id TEXT NOT NULL,
+    market_date TEXT NOT NULL,
+    settlement_high_f REAL NOT NULL,
+    exact INTEGER NOT NULL,
+    place TEXT,
+    timezone TEXT,
+    close_time TEXT,
+    fetched_at TEXT NOT NULL
+);
+
+-- Archived model high (Open-Meteo previous runs), one row per lead.
+CREATE TABLE IF NOT EXISTS archive_forecasts (
+    station_id TEXT NOT NULL,
+    market_date TEXT NOT NULL,
+    lead_hours INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    forecast_high_f REAL NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (station_id, market_date, lead_hours, model)
+);
+
+-- Settled brackets that the weather score can join to pre_event_prices.
+CREATE TABLE IF NOT EXISTS weather_brackets (
+    ticker TEXT PRIMARY KEY,
+    event_ticker TEXT NOT NULL,
+    series_ticker TEXT NOT NULL,
+    station_id TEXT NOT NULL,
+    market_date TEXT NOT NULL,
+    strike_type TEXT,
+    floor_strike REAL,
+    cap_strike REAL,
+    outcome REAL
+);
 """
 
 _UPSERT_MARKET = """
@@ -546,4 +611,152 @@ class MarketStore:
             "with_result": one(
                 "SELECT COUNT(*) FROM markets WHERE result IS NOT NULL"
             ),
+        }
+
+    def save_nws_forecast(
+        self,
+        *,
+        event_ticker: str,
+        captured_at: str,
+        series_ticker: str,
+        station_id: str,
+        market_date: str,
+        forecast_high_f: float,
+        lead_hours: float,
+        valid_time: str | None,
+        station_name: str,
+        source: str = "nws-hourly-max",
+    ) -> None:
+        """Remember the hourly max a scan priced, so a later fit can use it."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO nws_forecasts ("
+                "event_ticker, captured_at, series_ticker, station_id, market_date, "
+                "forecast_high_f, lead_hours, valid_time, station_name, source"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(event_ticker, captured_at) DO UPDATE SET "
+                "series_ticker = excluded.series_ticker, "
+                "station_id = excluded.station_id, "
+                "market_date = excluded.market_date, "
+                "forecast_high_f = excluded.forecast_high_f, "
+                "lead_hours = excluded.lead_hours, "
+                "valid_time = excluded.valid_time, "
+                "station_name = excluded.station_name, "
+                "source = excluded.source",
+                (
+                    event_ticker,
+                    captured_at,
+                    series_ticker,
+                    station_id,
+                    market_date,
+                    forecast_high_f,
+                    lead_hours,
+                    valid_time,
+                    station_name,
+                    source,
+                ),
+            )
+
+    def nws_forecasts(self) -> list[sqlite3.Row]:
+        """Every stored NWS hourly max, oldest capture first."""
+        return self.conn.execute(
+            "SELECT * FROM nws_forecasts ORDER BY event_ticker, captured_at"
+        ).fetchall()
+
+    def save_weather_days(self, rows: list[tuple]) -> None:
+        """Upsert settled daily highs. One tuple per ``weather_days`` row."""
+        if not rows:
+            return
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO weather_days ("
+                "event_ticker, series_ticker, station_id, market_date, "
+                "settlement_high_f, exact, place, timezone, close_time, fetched_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(event_ticker) DO UPDATE SET "
+                "series_ticker = excluded.series_ticker, "
+                "station_id = excluded.station_id, "
+                "market_date = excluded.market_date, "
+                "settlement_high_f = excluded.settlement_high_f, "
+                "exact = excluded.exact, "
+                "place = excluded.place, "
+                "timezone = excluded.timezone, "
+                "close_time = excluded.close_time, "
+                "fetched_at = excluded.fetched_at",
+                rows,
+            )
+
+    def save_archive_forecasts(self, rows: list[tuple]) -> None:
+        """Upsert archived model highs. Columns match ``archive_forecasts``."""
+        if not rows:
+            return
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO archive_forecasts ("
+                "station_id, market_date, lead_hours, model, forecast_high_f, fetched_at"
+                ") VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(station_id, market_date, lead_hours, model) DO UPDATE SET "
+                "forecast_high_f = excluded.forecast_high_f, "
+                "fetched_at = excluded.fetched_at",
+                rows,
+            )
+
+    def save_weather_brackets(self, rows: list[tuple]) -> None:
+        """Upsert settled brackets used by the weather score."""
+        if not rows:
+            return
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO weather_brackets ("
+                "ticker, event_ticker, series_ticker, station_id, market_date, "
+                "strike_type, floor_strike, cap_strike, outcome"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(ticker) DO UPDATE SET "
+                "event_ticker = excluded.event_ticker, "
+                "series_ticker = excluded.series_ticker, "
+                "station_id = excluded.station_id, "
+                "market_date = excluded.market_date, "
+                "strike_type = excluded.strike_type, "
+                "floor_strike = excluded.floor_strike, "
+                "cap_strike = excluded.cap_strike, "
+                "outcome = excluded.outcome",
+                rows,
+            )
+
+    def weather_days(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM weather_days ORDER BY market_date, event_ticker"
+        ).fetchall()
+
+    def archive_forecasts(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM archive_forecasts ORDER BY station_id, market_date, lead_hours"
+        ).fetchall()
+
+    def weather_brackets(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM weather_brackets ORDER BY ticker"
+        ).fetchall()
+
+    def prices_with_source(self, cutoff_source: str) -> dict[str, PreEventPrice]:
+        """Cached quotes whose cutoff was this rule, keyed by ticker."""
+        rows = self.conn.execute(
+            "SELECT * FROM pre_event_prices WHERE cutoff_source = ?",
+            (cutoff_source,),
+        ).fetchall()
+        return {
+            row["ticker"]: PreEventPrice(
+                ticker=row["ticker"],
+                series_ticker=row["series_ticker"],
+                cutoff_ts=int(row["cutoff_ts"]),
+                cutoff_source=row["cutoff_source"],
+                start_ts=int(row["start_ts"]),
+                candle_end_ts=row["candle_end_ts"],
+                yes_bid=row["yes_bid"],
+                yes_ask=row["yes_ask"],
+                last_price=row["last_price"],
+                fetched_at=row["fetched_at"],
+                history_missing=bool(row["history_missing"]),
+            )
+            for row in rows
         }

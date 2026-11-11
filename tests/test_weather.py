@@ -70,6 +70,11 @@ def test_station_comes_from_the_rules_not_the_title():
     assert cli_code(rules) == "CLISDF"
     assert nws_station_id(rules) == "KSDF"
     assert settlement_place(rules) == "Louisville"
+    dated = (
+        "If the highest temperature recorded at Atlanta for Aug 13, 2026, is greater than 99, "
+        "according to the National Weather Service's Climatological Report (Daily), the market resolves to Yes."
+    )
+    assert settlement_place(dated) == "Atlanta"
     assert nws_station_id("no station here") is None
 
 

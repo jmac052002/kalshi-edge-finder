@@ -14,15 +14,17 @@ date is still in the forecast. Once the afternoon has dropped out of the
 forecast, the day's high is no longer a forecast and this module refuses
 to invent one.
 
-The uncertainty is an assumption. ``api.weather.gov`` serves the current
-forecast only, so there is no archive here to fit a lead-time error to, and
-this repository does not pretend otherwise. A normal distribution is centered
-on the forecast high. Its standard deviation comes from a lead-time table of
-mean absolute errors in the neighborhood of published NWS max-temperature
-errors (about 2 to 3 F a day ahead, larger after that), converted with the
+The live scan centers that distribution on the NWS hourly high and takes
+the bias and the width from ``weather_calibration.json`` when that file is
+present (see ``kalshi_edge.weather_error``). The table below is only the
+fallback for a checkout with no fit. It is a lead-time table of mean
+absolute errors in the neighborhood of published NWS max-temperature errors
+(about 2 to 3 F a day ahead, larger after that), converted with the
 normal-distribution identity ``sd = MAE * sqrt(pi / 2)``, then combined in
 quadrature with half a degree for the gap between an NWS grid point and the
-Weather Company CLI print.
+Weather Company CLI print. ``api.weather.gov`` itself keeps no forecast
+archive, so that fallback is still an assumption and the scan does not rank
+it as an edge.
 
 Settlement is a whole number of degrees. A "65 to 66" contract is the
 integers 65 and 66, which is a latent temperature in ``[64.5, 66.5)``.
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable, Mapping
 from datetime import date
 
 # (maximum lead hours, assumed MAE in degrees Fahrenheit). The last row is
@@ -53,6 +56,13 @@ REPORTING_SD_F = 0.5
 
 _CLI_CODE = re.compile(r"\((CLI[A-Z0-9]{3,})\)")
 _PLACE = re.compile(r"recorded at ([^(]+?)\s*\(")
+# The place is the words after "recorded at/in" and before either a CLI code
+# or the date. Some rules put the date before the parenthesis:
+# "recorded at Atlanta for Aug 13, 2026, is greater than 99° ... Report (Daily)".
+_PLACE_CLAUSE = re.compile(
+    r"recorded (?:at|in)\s+(.+?)(?:\s*\(\s*CLI|\s+for\s+)",
+    re.IGNORECASE,
+)
 _MONTHS = {
     "JAN": 1,
     "FEB": 2,
@@ -77,6 +87,84 @@ def normal_cdf(z: float) -> float:
     if math.isnan(z):
         return math.nan
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta function (Numerical Recipes)."""
+    max_iter = 200
+    eps = 3e-14
+    tiny = 1e-30
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < tiny:
+        d = tiny
+    d = 1.0 / d
+    h = d
+    for m in range(1, max_iter + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def regularized_incomplete_beta(x: float, a: float, b: float) -> float:
+    """``I_x(a, b)``. Both shape parameters must be positive."""
+    if a <= 0 or b <= 0 or math.isnan(x):
+        return math.nan
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_bt = (
+        math.lgamma(a + b)
+        - math.lgamma(a)
+        - math.lgamma(b)
+        + a * math.log(x)
+        + b * math.log(1.0 - x)
+    )
+    bt = math.exp(log_bt)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_cdf(z: float, df: float) -> float:
+    """CDF of Student's t with ``df`` degrees of freedom.
+
+    ``df`` is the tail weight, not a temperature. The scale is 1: callers
+    standardize ``(x - location) / scale`` first. A normal is the limit of
+    large ``df``; this is here so a fitted daily-high error can have heavier
+    tails than a normal without adding a statistics dependency.
+    """
+    if math.isnan(z) or math.isnan(df) or df <= 0:
+        return math.nan
+    x = df / (df + z * z)
+    tail = 0.5 * regularized_incomplete_beta(x, 0.5 * df, 0.5)
+    if z >= 0:
+        return 1.0 - tail
+    return tail
 
 
 def assumed_sigma_f(lead_hours: float) -> float:
@@ -127,9 +215,12 @@ def temperature_yes_probability(
     strike_type: str | None,
     floor: float | None,
     cap: float | None,
+    df: float | None = None,
 ) -> float | None:
     """Probability the integer reported high lands in this contract.
 
+    ``sigma_f`` is the scale of the latent temperature: the standard
+    deviation when ``df`` is None, and the Student-t scale otherwise.
     Returns None for a strike type or a fractional strike this model does
     not describe, so the caller can leave the contract unpriced instead of
     guessing. The brackets of one event are a partition of the integers and
@@ -138,9 +229,14 @@ def temperature_yes_probability(
     """
     if not math.isfinite(mean_f) or not math.isfinite(sigma_f) or sigma_f <= 0:
         raise ValueError("mean and sigma must be finite and sigma > 0")
+    if df is not None and (not math.isfinite(df) or df <= 0):
+        raise ValueError("df must be positive when a t distribution is used")
 
     def cdf(bound: float) -> float:
-        return normal_cdf((bound - mean_f) / sigma_f)
+        z = (bound - mean_f) / sigma_f
+        if df is None:
+            return normal_cdf(z)
+        return student_t_cdf(z, df)
 
     kind = (strike_type or "").lower()
     low = _whole_degree(floor)
@@ -180,15 +276,106 @@ def nws_station_id(rules_primary: str | None) -> str | None:
     return "K" + code[-3:]
 
 
+def place_mentioned(rules_primary: str | None, place: str | None) -> bool:
+    """Whether the rules text names ``place``.
+
+    Older archived markets describe the same station in a sentence ("Central
+    Park, New York") and do not carry a ``(CLINYC)`` code. The longest word
+    of the place the modern rules name ("York" in "New York City") is enough
+    to tell those apart from a series that later moved to a different city.
+    """
+    if not rules_primary or not place:
+        return False
+    text = rules_primary.lower()
+    if place.lower() in text:
+        return True
+    words = [word for word in re.split(r"[^a-z0-9]+", place.lower()) if len(word) >= 4]
+    if not words:
+        return False
+    return max(words, key=len) in text
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def settled_high(markets: Iterable[Mapping]) -> tuple[float, bool] | None:
+    """The reported daily high, and whether that number is the exact print.
+
+    ``expiration_value`` is the print when Kalshi sends one: a whole number
+    of degrees, repeated on every bracket of the event. Older archived
+    markets leave it blank. The high is then known only up to the winning
+    bracket. "64 to 65" YES is 64 or 65, and this returns their midpoint
+    with the exact flag false. A winning tail ("63 or below", "72 or above")
+    does not name a temperature, so those events return None.
+    """
+    rows = [market for market in markets if isinstance(market, Mapping)]
+    prints: list[float] = []
+    for market in rows:
+        number = _finite_float(market.get("expiration_value"))
+        if number is None or not -80.0 <= number <= 150.0:
+            continue
+        prints.append(number)
+    if prints:
+        if max(prints) - min(prints) > 0.2:
+            return None
+        return sum(prints) / len(prints), True
+    winners = [market for market in rows if str(market.get("result") or "").lower() == "yes"]
+    if len(winners) != 1:
+        return None
+    winner = winners[0]
+    if str(winner.get("strike_type") or "").lower() != "between":
+        return None
+    floor = _whole_degree(_finite_float(winner.get("floor_strike")))
+    cap = _whole_degree(_finite_float(winner.get("cap_strike")))
+    if floor is None or cap is None or cap < floor:
+        return None
+    if floor == cap:
+        return floor, True
+    return (floor + cap) / 2.0, False
+
+
+def tidy_place(place: str | None) -> str | None:
+    """Drop a date clause that the rules glued onto the station name."""
+    if not place:
+        return None
+    place = re.split(r"\s+for\s+", place, maxsplit=1)[0]
+    place = re.split(r"\s+as reported\b", place, maxsplit=1, flags=re.IGNORECASE)[0]
+    place = place.strip(" ,.")
+    return place or None
+
+
 def settlement_place(rules_primary: str | None) -> str | None:
-    """The place named just before the CLI code, such as ``New York City``."""
+    """The place the rules name, such as ``New York City`` or ``Louisville``.
+
+    Stops at the CLI code or at ``for <date>``. A rule that continues into
+    the strike ("Atlanta for Aug 13, 2026, is greater than 99° ...") would
+    otherwise swallow the whole sentence.
+    """
     if not rules_primary:
         return None
-    match = _PLACE.search(rules_primary)
+    match = _PLACE_CLAUSE.search(rules_primary)
     if match is None:
-        return None
-    place = match.group(1).strip()
-    return place or None
+        match = _PLACE.search(rules_primary)
+        if match is None:
+            return None
+    return tidy_place(match.group(1))
 
 
 def event_date(event_ticker: str | None) -> date | None:
