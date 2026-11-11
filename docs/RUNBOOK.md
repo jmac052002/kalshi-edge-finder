@@ -210,7 +210,7 @@ Takes the newest Kalshi snapshot and the newest odds capture, matches games by t
 python -m kalshi_edge.scan
 ```
 
-One list for markets that are not NFL games. It needs no key. It calls the public Kalshi API, `api.weather.gov` (with a User-Agent), and the Cleveland Fed nowcast files. Weather contracts and the economic series are written into `data/kalshi.db` the same way `collect --mode snapshot` writes them. The short category list is printed and not stored.
+One list for markets that are not NFL games. It needs no key. It calls the public Kalshi API, `api.weather.gov` (with a User-Agent), and the Cleveland Fed nowcast files. Weather contracts and the economic series are written into `data/kalshi.db` the same way `collect --mode snapshot` writes them, and each NWS hourly high the scan prices is written to `nws_forecasts` so a later `weather_calibrate` can fit the forecast the scan actually used. The short category list is printed and not stored.
 
 Read the first verdict before anything else. Either some sides have a model probability above the break-even of a $10 order at the ask, or the report says `nothing clears costs today`. Jobs, unemployment, initial claims, and the Fed decision are listed with price and settlement time only: there is no free consensus for them, and this command will not invent one. CPI is modeled only for the month the Cleveland Fed file is currently nowcasting.
 
@@ -262,7 +262,9 @@ source .venv-wsl/bin/activate
 python -m kalshi_edge.scan
 ```
 
-No key, and it does not have to share a shell with the odds capture. A positive line is still a question: check the flag (`THIN` and `WIDE` mean the ask may not fill $10), check that the "why" names a forecast or a nowcast rather than a guess, and do not treat a weather edge as anything but the assumed error model described in the README.
+No key, and it does not have to share a shell with the odds capture. A positive line is still a question: check the flag (`THIN` and `WIDE` mean the ask may not fill $10; `VERIFY` means the model and the ask disagree by more than the weather guard and the side was not ranked), check that the "why" names a forecast or a nowcast rather than a guess, and read a weather edge as the fitted error in the README, which is a GFS archive transferred onto the NWS high until enough stored NWS forecasts have settled.
+
+Refit that error with `python -m kalshi_edge.weather_calibrate` when you want the stored NWS sample in the fit. `--fit-only` uses the cache and does not call the network. The daily scan already records the forecast it used.
 
 ## Reading the output
 

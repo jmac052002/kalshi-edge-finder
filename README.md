@@ -2,7 +2,7 @@
 
 Python tools that read [Kalshi](https://kalshi.com) prediction-market data from the public Trade API, store it in a local SQLite file, check whether the prices were honest probabilities, compare them with sportsbook moneylines, and list short-dated non-sports markets next to a weather forecast or a public inflation nowcast. The Kalshi side needs no account and no API key. The sportsbook side needs one free key from [The Odds API](https://the-odds-api.com), kept in an environment variable. Nothing in this repository places an order.
 
-`kalshi_edge.collect` gets clean market data onto disk. `kalshi_edge.calibrate` asks whether contracts priced at 45 cents resolved YES about 45% of the time, and whether buying them would have made money after fees. `kalshi_edge.odds` and `kalshi_edge.compare` put a sportsbook's de-vigged probability next to each open Kalshi game contract. `kalshi_edge.scan` is the daily list for everything that is not a game: city high temperatures, a handful of economic releases, and other markets in chosen categories that settle soon. See [How to run it](#how-to-run-it-the-routine) for the weekly routine, [The non-sports scan](#the-non-sports-scan) for the daily one, [docs/RUNBOOK.md](docs/RUNBOOK.md) for a step-by-step operator's guide, and [Roadmap](#roadmap) for what is still missing.
+`kalshi_edge.collect` gets clean market data onto disk. `kalshi_edge.calibrate` asks whether contracts priced at 45 cents resolved YES about 45% of the time, and whether buying them would have made money after fees. `kalshi_edge.odds` and `kalshi_edge.compare` put a sportsbook's de-vigged probability next to each open Kalshi game contract. `kalshi_edge.scan` is the daily list for everything that is not a game: city high temperatures, a handful of economic releases, and other markets in chosen categories that settle soon. `kalshi_edge.weather_calibrate` fits the daily-high error to settled city markets. See [How to run it](#how-to-run-it-the-routine) for the weekly routine, [The non-sports scan](#the-non-sports-scan) for the daily one, [docs/RUNBOOK.md](docs/RUNBOOK.md) for a step-by-step operator's guide, and [Roadmap](#roadmap) for what is still missing.
 
 ## What exists now
 
@@ -14,6 +14,7 @@ Python tools that read [Kalshi](https://kalshi.com) prediction-market data from 
 | `python -m kalshi_edge.odds` | Captures sportsbook moneylines for one sport from The Odds API (needs `ODDS_API_KEY`) |
 | `python -m kalshi_edge.compare` | Matches open Kalshi game contracts to those lines and prints break-even, fair probability, edge and EV per contract. Offline |
 | `python -m kalshi_edge.scan` | Ranks short-dated non-sports markets. Models daily high temperatures and CPI when a public nowcast covers that month. Everything else is price and settlement date only. Never trades |
+| `python -m kalshi_edge.weather_calibrate` | Fits the daily-high bias and width to settled `KXHIGH` markets and an archived forecast. Public data only. Writes the file `scan` loads |
 
 ### Collector
 
@@ -110,11 +111,31 @@ The settlement station comes from the market rules, not from the series title. T
 
 The forecast is the highest hourly temperature `api.weather.gov` still shows for the market's local calendar date. The 12-hour "daytime" period is one rounded number for 6am to 6pm. The contract settles on the calendar-day maximum, and the hourly grid is that maximum with the hour attached, so the lead time is the hour of the high. Two gaps make the grid unusable, and the city is then not priced. The afternoon has to still be ahead. And if local noon has already passed, every hour from noon through the current hour has to still be in the grid: the hourly product drops hours once they end, so a 3pm fragment that reads 65°F and falling is the temperature after the peak, not the peak, even when a 5pm hour is still listed. The client sends a User-Agent, as that API asks, and uses the same pacing and retries as the Kalshi client.
 
-The probability is a normal distribution centered on that forecast high. Settlement is a whole number of degrees: "65° to 66°" is the integers 65 and 66, a latent temperature in `[64.5, 66.5)`; "greater than 66" is 67 or above. The brackets of a complete ladder sum to 1.
+The probability is a distribution centered on that forecast high plus a fitted bias. Settlement is a whole number of degrees: "65° to 66°" is the integers 65 and 66, a latent temperature in `[64.5, 66.5)`; "greater than 66" is 67 or above. The brackets of a complete ladder sum to 1.
 
-The width is an **assumption**, not a calibration. `api.weather.gov` serves the current forecast only, so there is no public archive here to fit lead-time error to Kalshi's settlements, and this tool does not pretend there is. Mean absolute error is taken from a small table in the neighborhood of published NWS max-temperature errors: 2°F inside 12 hours, 2.5°F inside a day, then 3.2, 3.8, 4.4, and 5°F. A normal distribution has `sd = MAE * sqrt(pi / 2)`. Half a degree is added in quadrature for the gap between the NWS grid and the Weather Company CLI print the contract actually settles on. Every weather line says `assumed sd` and `not fit to settlements`.
+The bias and the width are a fit. `api.weather.gov` keeps no forecast archive, so the errors are not NWS errors and the file says so. `python -m kalshi_edge.weather_calibrate` reads settled `KXHIGH*` markets from the live list and from `GET /historical/markets`. The daily high is `expiration_value` when Kalshi sends it. Older rows leave that blank; the high is then the midpoint of the winning two-degree bin, and a winning tail with no print is dropped because it does not name a temperature. Each high is paired with the [Open-Meteo Previous Runs API](https://open-meteo.com/en/docs/previous-runs-api), model `gfs_seamless`. `temperature_2m_previous_day1` is the temperature that run predicted 24 hours before the valid hour, and `previous_day2` is 48 hours before. The forecast high is the max of those hours on the station's local date, the same reduction this scan applies to the NWS grid. The day-0 series is a short lead and is not used. That archive, for this model, is used here from January 2024.
 
-Under that standard deviation a two-degree bracket holds about a quarter of the probability even when the forecast sits on it. The live book often prices that same bracket much higher, so NO on the market's favorite bin clears this test over and over. Those lines are one assumption repeating, not a pile of unrelated discoveries. The text prints the 12 largest gaps and the count of how many sides cleared; `--json` has every side. A penny ask on a tail can also clear, and it is flagged `THIN` or `NOBID` when the book will not fill $10.
+Bias is the mean of settlement minus that GFS high. The scan adds it to the live NWS high. That transfers a GFS bias onto the NWS. It is the right correction when the two forecasts share the bias (a station the model is always cold at), and the wrong one when the NWS forecaster already took it out. Cities with at least 8 settled days get their own bias and width, shrunk toward the pool. Everyone else uses the pool. Leads up to 36 hours use the 24-hour fit, because that is the lead a same-day scan actually has and the archive has nothing shorter, so those hours are not given a tighter width than the data measured. Leads out to 72 hours use the 48-hour fit. Past that, the width grows with the old lead-time table. A Student-t replaces the normal when the tails are heavy enough that the likelihood gain is real. The fitted file is `kalshi_edge/weather_calibration.json`. The fit command prints the bias, the standard deviation, and the Brier and log loss against the Kalshi price.
+
+The price in that comparison is the last two-sided hourly candle at or before local noon on the market date. Noon is after the 24-hour forecast existed and before the usual afternoon high. The score is fit on days before Kalshi's historical cutoff and evaluated on quotes after it, so the test days are not the days that set the width. Brackets in one event are one forecast, not independent samples. The market's own noon price is on the same table. If the market's Brier is better, a weather "edge" is the model disagreeing with a price that has been the better probability, and it should be read that way.
+
+Two brakes sit on top of the fee break-even, for weather only. The model has to beat that break-even by an extra margin (3 points in the shipped file), so a one-point gap is not a trade. A model-minus-ask gap at least as large as the disagree guard is printed under `model disagrees strongly, verify` and is not ranked. The guard is the 95th percentile of the historical absolute gap between the model and the noon midpoint, clamped to between 10 and 20 points. That is the line that used to show up as dozens of +40 point NO bets on the market's favorite bin. The fee and the spread are unchanged: you pay the ask, and the spread is not added a second time. A penny ask on a tail can still clear, and it is flagged `THIN` or `NOBID` when the book will not fill $10.
+
+Every scan writes the NWS hourly high it used into `nws_forecasts`. A later fit prefers those stored forecasts once 30 or more city-days at the 24-hour lead have settled, and does not mix them with the GFS sample. Until that day the scan is using the GFS transfer. A missing calibration file falls back to the old assumed width and does not rank weather at all.
+
+The fit shipped with this repo, run on 2026-11-11, used 10,155 city-days at 24 hours and 10,152 at 48 hours, across 24 stations, from January 2024 through the settlements then on the books. One pair was dropped as an outlier (more than 25°F off). The 24-hour error is a Student-t with 6 degrees of freedom: pooled bias +1.10°F (the GFS hourly max runs cold versus the CLI print), standard deviation 3.10°F. At 48 hours the bias is +0.12°F and the standard deviation is 3.83°F. City biases at 24 hours, after shrinkage, run from −0.34°F in Las Vegas to +2.13°F in Austin. `KXHIGHHOU` and `KXHIGHOU` did not name one CLI station in the rules, so they are not in the fit; Houston in the file is Hobby (`KHOU`), from the series that did.
+
+Scored out of sample (fit on days before 2026-09-11, the exchange's historical cutoff that day; quotes after it; 8,634 contracts, 1,439 winning bins):
+
+| | Brier | log loss | winning-bin log loss |
+| --- | ---: | ---: | ---: |
+| Kalshi noon midpoint | 0.077 | 0.241 | 0.810 |
+| old assumed normal, same GFS high | 0.141 | 0.446 | 1.725 |
+| this fit | 0.132 | 0.424 | 1.635 |
+
+Lower is better. The fit beats the old assumed width and loses to the noon price, by a lot, on the same contracts. A weather line is the model disagreeing with a price that has been the better probability. The 95th percentile of that absolute gap was 0.49, so the shipped guard is the 20-point cap.
+
+`weather_calibrate` prints that report and writes `kalshi_edge/weather_calibration.json`, which is the parameter file `scan` loads. It does not write a dashboard report. The dashboard's calibration panel is still `python -m kalshi_edge.calibrate --json` (the pre-event price check). There is no panel for this weather fit yet.
 
 ### Economic releases
 
@@ -168,7 +189,14 @@ At two credits a run, the free tier covers one odds capture a day for the month 
 python -m kalshi_edge.scan
 ```
 
-No key. It takes a few minutes because it walks the open events before it reads the short-dated series, at the same quarter-second pace as `collect`. The first line that matters is either a list of sides whose model beats the ask after fees, or `nothing clears costs today`. A positive line is a question, the same as a positive line in `compare`.
+No key. It takes a few minutes because it walks the open events before it reads the short-dated series, at the same quarter-second pace as `collect`. The first line that matters is either a list of sides whose model beats the ask after fees, or `nothing clears costs today`. A weather line that says `model disagrees strongly, verify` is not in that list. A positive line is a question, the same as a positive line in `compare`.
+
+Refit the weather error when the stored NWS sample is worth using, or when a new city has settled for a while. The first run is slow because it pages the historical markets and then one candlestick history per recent bracket. A rerun is `--fit-only` and reads the cache.
+
+```bash
+python -m kalshi_edge.weather_calibrate
+python -m kalshi_edge.weather_calibrate --fit-only
+```
 
 **What to do with a positive edge.** Treat it as a question, not an answer. Check the gap, check that the reference was Pinnacle and not a median of two books, check `alt` to see whether the other de-vig method agrees, and remember that the book depth at that ask is unknown. A +0.3 point edge on one contract is inside the noise of every one of those. Nothing in this repository is a reason to bet more than you already planned to.
 
@@ -241,200 +269,81 @@ Scan flags: `--budget DOLLARS` (default 10), `--horizon-days N` (default 30), `-
 
 ### Sample scan output
 
-Real output from a live run. The block below is the command's own text, not a mock.
+Real output from `python -m kalshi_edge.scan` at 2026-11-11T04:52:32Z (10:52pm Central on Nov 10). The Nov 11 highs were still ahead. The economic-release block and the short-dated list from this same run are left out below; they are price-only, 31 release events and 941 short-dated markets, same role as before. The lines here are the command's own text.
 
 ```text
-scan  generated=2026-11-11T03:19:23Z  budget=$10.00  horizon=30d  zone=America/Chicago
-modeled sides=368  clear=180  econ events=31  short-dated=940
-edges that clear costs (180); showing the best 12. The rest are in --json.
-  KXHIGHLAX-26NOV11-T83  NO  Los Angeles: 82° or below  ask 0.3800  model 0.865  brkeven 0.397  edge +46.8pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 86F at KLAX (Los Angeles, Los Angeles International Airport), lead 17h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTMIN-26NOV11-T55  NO  Minneapolis: 56° or above  ask 0.3900  model 0.865  brkeven 0.407  edge +45.8pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 52F at KMSP (Minneapolis, Minneapolis-St. Paul International Airport), lead 17h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTOKC-26NOV11-B72.5  NO  Oklahoma City: 72° to 73°  ask 0.3500  model 0.817  brkeven 0.366  edge +45.1pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 70F at KOKC (Oklahoma City, Will Rogers World Airport), lead 18h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTSDF-26NOV11-B71.5  NO  Louisville: 71° to 72°  ask 0.4100  model 0.863  brkeven 0.427  edge +43.6pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 68F at KSDF (Louisville Muhammad Ali International Airport), lead 17h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTDAL-26NOV11-B80.5  NO  Dallas: 80° to 81°  ask 0.3100  model 0.756  brkeven 0.325  edge +43.1pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 80F at KDFW (Dallas/Fort Worth International Airport), lead 18h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTLV-26NOV11-B76.5  NO  Las Vegas: 76° to 77°  ask 0.3100  model 0.756  brkeven 0.325  edge +43.1pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 76F at KLAS (Harry Reid International Airport), lead 19h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTPHX-26NOV11-B83.5  NO  Phoenix: 83° to 84°  ask 0.3200  model 0.756  brkeven 0.336  edge +42.0pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 84F at KPHX (Phoenix, Phoenix Sky Harbor International Airport), lead 19h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTHOU-26NOV11-T76  NO  Houston: 75° or below  ask 0.1400  model 0.563  brkeven 0.149  edge +41.4pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 76F at KHOU (Houston, Houston Hobby Airport), lead 18h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHMIA-26NOV11-B85.5  NO  Miami: 85° to 86°  ask 0.3500  model 0.778  brkeven 0.366  edge +41.2pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 84F at KMIA (Miami, Miami International Airport), lead 14h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHDEN-26NOV11-B65.5  NO  Denver: 65° to 66°  ask 0.4100  model 0.817  brkeven 0.427  edge +39.0pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 63F at KDEN (Denver, Denver International Airport), lead 18h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTTTN-26NOV11-B64.5  NO  Trenton: 64° to 65°  ask 0.4300  model 0.817  brkeven 0.447  edge +37.0pp  settles 2026-11-12 14:00 CST  WIDE
-    NWS hourly high 62F at KTTN (Trenton-Mercer Airport), lead 15h, assumed sd 3.2F (not fit to settlements)
-  KXHIGHTSEA-26NOV11-B66.5  NO  Seattle: 66° to 67°  ask 0.4700  model 0.817  brkeven 0.487  edge +32.9pp  settles 2026-11-12 14:00 CST  -
-    NWS hourly high 64F at KSEA (Seattle, Seattle-Tacoma International Airport), lead 18h, assumed sd 3.2F (not fit to settlements)
-economic releases (price only except where a nowcast month matches):
-  KXJOBLESSCLAIMS-26NOV12  initial jobless claims  settles 2026-11-12 08:59 CST  11 strikes  inside horizon
-    price only: no free public consensus; price and settlement only
-    KXJOBLESSCLAIMS-26NOV12-190000  At least 190,000  YES ask 0.4100  NO ask 0.6000  vol24h 208  -
-    KXJOBLESSCLAIMS-26NOV12-185000  At least 185,000  YES ask 0.6200  NO ask 0.3900  vol24h 1085  -
-    KXJOBLESSCLAIMS-26NOV12-180000  At least 180,000  YES ask 0.9000  NO ask 0.1400  vol24h 30  THIN
-    KXJOBLESSCLAIMS-26NOV12-195000  At least 195,000  YES ask 0.1000  NO ask 0.9100  vol24h 2041  -
-    KXJOBLESSCLAIMS-26NOV12-200000  At least 200,000  YES ask 0.0500  NO ask 0.9900  vol24h 137  -
-    KXJOBLESSCLAIMS-26NOV12-205000  At least 205,000  YES ask 0.0300  NO ask 0.9900  vol24h 36  THIN
-  KXPAYROLLS-26NOV  nonfarm payrolls  settles 2026-12-04 09:00 CST  13 strikes  inside horizon
-    price only: no free public consensus; price and settlement only
-    KXPAYROLLS-26NOV-T90000  Above 90,000  YES ask 0.5100  NO ask 0.5800  vol24h 15  WIDE,THIN
-    KXPAYROLLS-26NOV-T100000  Above 100,000  YES ask 0.4500  NO ask 0.6200  vol24h 5  WIDE,THIN
-    KXPAYROLLS-26NOV-T80000  Above 80,000  YES ask 0.5800  NO ask 0.4700  vol24h 169  -
-    KXPAYROLLS-26NOV-T70000  Above 70,000  YES ask 0.6400  NO ask 0.4500  vol24h 108  WIDE
-    KXPAYROLLS-26NOV-T125000  Above 125,000  YES ask 0.3200  NO ask 0.7200  vol24h 0  THIN
-    KXPAYROLLS-26NOV-T60000  Above 60,000  YES ask 0.6900  NO ask 0.3800  vol24h 11  WIDE,THIN
-  KXU3-26NOV  unemployment rate  settles 2026-12-04 09:00 CST  14 strikes  inside horizon
-    price only: no free public consensus; price and settlement only
-    KXU3-26NOV-T4.1  Above 4.1%  YES ask 0.5000  NO ask 0.5700  vol24h 68  WIDE
-    KXU3-26NOV-T4.0  Above 4.0%  YES ask 0.8400  NO ask 0.1900  vol24h 250  -
-    KXU3-26NOV-T4.2  Above 4.2%  YES ask 0.0700  NO ask 0.9500  vol24h 482  -
-    KXU3-26NOV-T4.3  Above 4.3%  YES ask 0.0400  NO ask 0.9900  vol24h 37  THIN
-    KXU3-26NOV-T4.6  Above 4.6%  YES ask 0.0400  NO ask 1.0000  vol24h 0  NOBID,THIN
-    KXU3-26NOV-T4.7  Above 4.7%  YES ask 0.0400  NO ask 1.0000  vol24h 21  NOBID,THIN
-  KXFED-26DEC  Fed funds upper bound  settles 2026-12-09 13:05 CST  11 strikes  inside horizon
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-    KXFED-26DEC-T4.25  Above 4.25%  YES ask 0.1000  NO ask 0.9100  vol24h 175785  -
-    KXFED-26DEC-T4.00  Above 4.00%  YES ask 0.9600  NO ask 0.0500  vol24h 63603  -
-    KXFED-26DEC-T4.50  Above 4.50%  YES ask 0.0200  NO ask 0.9900  vol24h 666  -
-    KXFED-26DEC-T4.75  Above 4.75%  YES ask 0.0100  NO ask 1.0000  vol24h 0  NOBID,THIN
-    KXFED-26DEC-T5.00  Above 5.00%  YES ask 0.0100  NO ask 1.0000  vol24h 0  NOBID,THIN
-    KXFED-26DEC-T5.25  Above 5.25%  YES ask 0.0100  NO ask 1.0000  vol24h 0  NOBID,THIN
-  KXFEDDECISION-26DEC  Fed meeting decision  settles 2026-12-09 13:05 CST  5 strikes  inside horizon
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-    KXFEDDECISION-26DEC-H25  Hike 25bps  YES ask 0.8600  NO ask 0.1500  vol24h 697768  -
-    KXFEDDECISION-26DEC-H26  Hike >25bps  YES ask 0.1200  NO ask 0.8900  vol24h 1766784  -
-    KXFEDDECISION-26DEC-H0  Fed maintains rate  YES ask 0.0500  NO ask 0.9600  vol24h 654300  -
-    KXFEDDECISION-26DEC-C25  Cut 25bps  YES ask 0.0100  NO ask 1.0000  vol24h 23756  NOBID
-    KXFEDDECISION-26DEC-C26  Cut >25bps  YES ask 0.0100  NO ask 1.0000  vol24h 4100  NOBID
-  KXCPI-26NOV  CPI, month over month  settles 2026-12-10 08:56 CST  9 strikes  inside horizon
-    modeled from Cleveland Fed month-over-month nowcast (CPI Inflation) 0.14 (sd 0.22, 158 months)
-    KXCPI-26NOV-T0.0  Above 0.0%  YES ask 0.4300  NO ask 0.5900  vol24h 7343  -
-    KXCPI-26NOV-T-0.1  Above -0.1%  YES ask 0.7800  NO ask 0.2700  vol24h 946  -
-    KXCPI-26NOV-T0.1  Above 0.1%  YES ask 0.1800  NO ask 0.8300  vol24h 11045  -
-    KXCPI-26NOV-T-0.2  Above -0.2%  YES ask 0.9200  NO ask 0.0900  vol24h 1701  -
-    KXCPI-26NOV-T0.2  Above 0.2%  YES ask 0.0800  NO ask 0.9400  vol24h 4829  -
-    KXCPI-26NOV-T-0.3  Above -0.3%  YES ask 0.9500  NO ask 0.1000  vol24h 1688  -
-  KXCPICORE-26NOV  core CPI, month over month  settles 2026-12-10 09:00 CST  11 strikes  inside horizon
-    modeled from Cleveland Fed month-over-month nowcast (Core CPI Inflation) 0.21 (sd 0.16, 158 months)
-    KXCPICORE-26NOV-T0.2  Above 0.2%  YES ask 0.4400  NO ask 0.5800  vol24h 188  -
-    KXCPICORE-26NOV-T0.3  Above 0.3%  YES ask 0.1400  NO ask 0.8800  vol24h 3107  -
-    KXCPICORE-26NOV-T0.1  Above 0.1%  YES ask 0.9400  NO ask 0.1800  vol24h 2483  WIDE
-    KXCPICORE-26NOV-T0.4  Above 0.4%  YES ask 0.0400  NO ask 0.9700  vol24h 0  THIN
-    KXCPICORE-26NOV-T0.0  Above 0.0%  YES ask 0.9700  NO ask 0.0400  vol24h 15  THIN
-    KXCPICORE-26NOV-T0.5  Above 0.5%  YES ask 0.0200  NO ask 0.9900  vol24h 1  THIN
-  KXCPICOREYOY-26NOV  core CPI, year over year  settles 2026-12-10 09:00 CST  16 strikes  inside horizon
-    modeled from Cleveland Fed year-over-year nowcast (Core CPI Inflation) 2.87 (sd 0.27, 158 months)
-    KXCPICOREYOY-26NOV-T2.8  Above 2.8%  YES ask 0.6400  NO ask 0.3700  vol24h 2993  -
-    KXCPICOREYOY-26NOV-T3.0  Above 3.0%  YES ask 0.2800  NO ask 0.8200  vol24h 230  WIDE
-    KXCPICOREYOY-26NOV-T2.9  Above 2.9%  YES ask 0.2700  NO ask 0.8000  vol24h 115  WIDE
-    KXCPICOREYOY-26NOV-T2.7  Above 2.7%  YES ask 0.8400  NO ask 0.2200  vol24h 1470  WIDE
-    KXCPICOREYOY-26NOV-T2.6  Above 2.6%  YES ask 0.9200  NO ask 0.1700  vol24h 1  WIDE,THIN
-    KXCPICOREYOY-26NOV-T3.1  Above 3.1%  YES ask 0.0400  NO ask 0.9800  vol24h 0  THIN
-  KXCPIYOY-26NOV  CPI, year over year  settles 2026-12-10 09:00 CST  21 strikes  inside horizon
-    modeled from Cleveland Fed year-over-year nowcast (CPI Inflation) 3.94 (sd 0.31, 158 months)
-    KXCPIYOY-26NOV-T3.7  Above 3.7%  YES ask 0.6700  NO ask 0.3700  vol24h 10966  -
-    KXCPIYOY-26NOV-T3.8  Above 3.8%  YES ask 0.3100  NO ask 0.7000  vol24h 9690  -
-    KXCPIYOY-26NOV-T3.9  Above 3.9%  YES ask 0.1800  NO ask 0.8400  vol24h 12291  -
-    KXCPIYOY-26NOV-T4.0  Above 4.0%  YES ask 0.1200  NO ask 0.9000  vol24h 7967  -
-    KXCPIYOY-26NOV-T3.6  Above 3.6%  YES ask 0.9000  NO ask 0.2500  vol24h 6548  WIDE
-    KXCPIYOY-26NOV-T3.5  Above 3.5%  YES ask 0.9200  NO ask 0.1000  vol24h 9754  -
-  KXCPI-26DEC  CPI, month over month  settles 2027-01-13 08:56 CST  11 strikes  outside horizon, not ranked
-    price only: the nowcast file covers 2026-11, not 2026-12
-  KXCPICORE-26DEC  core CPI, month over month  settles 2027-01-13 09:00 CST  11 strikes  outside horizon, not ranked
-    price only: the nowcast file covers 2026-11, not 2026-12
-  KXCPICOREYOY-26DEC  core CPI, year over year  settles 2027-01-13 09:00 CST  15 strikes  outside horizon, not ranked
-    price only: the nowcast file covers 2026-11, not 2026-12
-  KXCPIYOY-26DEC  CPI, year over year  settles 2027-01-13 09:00 CST  21 strikes  outside horizon, not ranked
-    price only: the nowcast file covers 2026-11, not 2026-12
-  KXFED-27JAN  Fed funds upper bound  settles 2027-01-27 13:05 CST  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27JAN  Fed meeting decision  settles 2027-01-27 13:05 CST  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27MAR  Fed funds upper bound  settles 2027-03-17 13:05 CDT  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27MAR  Fed meeting decision  settles 2027-03-17 13:05 CDT  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27APR  Fed funds upper bound  settles 2027-04-28 13:05 CDT  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27APR  Fed meeting decision  settles 2027-04-28 13:05 CDT  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27JUN  Fed funds upper bound  settles 2027-06-09 13:05 CDT  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27JUN  Fed meeting decision  settles 2027-06-09 13:05 CDT  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27JUL  Fed funds upper bound  settles 2027-07-28 13:05 CDT  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27JUL  Fed meeting decision  settles 2027-07-28 13:05 CDT  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27SEP  Fed funds upper bound  settles 2027-09-15 13:05 CDT  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27SEP  Fed meeting decision  settles 2027-09-15 13:05 CDT  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27OCT  Fed funds upper bound  settles 2027-10-27 13:05 CDT  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27OCT  Fed meeting decision  settles 2027-10-27 13:05 CDT  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-27DEC  Fed funds upper bound  settles 2027-12-08 13:05 CST  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-27DEC  Fed meeting decision  settles 2027-12-08 13:05 CST  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-  KXFED-28JAN  Fed funds upper bound  settles 2028-01-26 13:05 CST  25 strikes  outside horizon, not ranked
-    price only: no free probability source (same reason as the meeting decision); price and settlement only
-  KXFEDDECISION-28JAN  Fed meeting decision  settles 2028-01-26 13:05 CST  5 strikes  outside horizon, not ranked
-    price only: CME FedWatch is a paid API; a fed-funds future is a month average, not the post-meeting rate
-short-dated Science and Technology, Companies, AI, nearest first, one strike per event (the yes ask closest to 50 cents). price only, not edges. shown 12 events of 21 (940 markets).
-  740 further markets were past the 200 kept in this report
-  KXANTHVREQ-10NOV26-T7P2  settles 2026-11-11 09:00 CST  YES ask 0.9900  NO ask 0.0900  vol24h 224  WIDE
-    Anthropic Vercel share of AI Gateway requests across the top labs above 7.2%
-  KXANTHVSPEND-10NOV26-T46P6  settles 2026-11-11 09:00 CST  YES ask 0.4900  NO ask 1.0000  vol24h 0  NOBID,WIDE,THIN
-    Anthropic Vercel share of AI Gateway spend across the top labs above 46.6%
-  KXDEEPVREQ-10NOV26-T15P4  settles 2026-11-11 09:00 CST  YES ask 0.1100  NO ask 1.0000  vol24h 127  NOBID,WIDE
-    DeepSeek Vercel share of AI Gateway requests across the top labs above 15.4%
-  KXGOOGVREQ-10NOV26-T10P5  settles 2026-11-11 09:00 CST  YES ask 0.0600  NO ask 0.9800  vol24h 252  -
-    Google Vercel share of AI Gateway requests across the top labs above 10.5%
-  KXGOOGVSPEND-10NOV26-T8P1  settles 2026-11-11 09:00 CST  YES ask 0.4900  NO ask 1.0000  vol24h 0  NOBID,WIDE,THIN
-    Google Vercel share of AI Gateway spend across the top labs above 8.1%
-  KXMOONVSPEND-10NOV26-T13P6  settles 2026-11-11 09:00 CST  YES ask 0.0900  NO ask 1.0000  vol24h 8  NOBID,WIDE,THIN
-    Moonshot AI Vercel share of AI Gateway spend across the top labs above 13.6%
-  KXOPENVREQ-10NOV26-T22P8  settles 2026-11-11 09:00 CST  YES ask 0.1100  NO ask 1.0000  vol24h 4  NOBID,WIDE,THIN
-    OpenAI Vercel share of AI Gateway requests across the top labs above 22.8%
-  KXOPENVSPEND-10NOV26-T15P8  settles 2026-11-11 09:00 CST  YES ask 0.1100  NO ask 1.0000  vol24h 145  NOBID,WIDE
-    OpenAI Vercel share of AI Gateway spend across the top labs above 15.8%
-  KXOSSPEND-10NOV26-T22P0  settles 2026-11-11 09:00 CST  YES ask 0.9900  NO ask 0.9100  vol24h 49  WIDE,THIN
-    Open source share of spend above 22.0%
-  KXZAIVREQ-10NOV26-T10P8  settles 2026-11-11 09:00 CST  YES ask 0.0900  NO ask 1.0000  vol24h 0  NOBID,WIDE,THIN
-    Z.AI Vercel share of AI Gateway requests across the top labs above 10.8%
-  KXZAIVSPEND-10NOV26-T17P5  settles 2026-11-11 09:00 CST  YES ask 0.0900  NO ask 1.0000  vol24h 3350  NOBID,WIDE
-    Z.AI Vercel share of AI Gateway spend across the top labs above 17.5%
-  KXANTHVREQ-12NOV26-T8P2  settles 2026-11-13 09:00 CST  YES ask 0.5500  NO ask 0.6400  vol24h 0  WIDE,THIN
-    Anthropic Vercel share of AI Gateway requests across the top labs above 8.2%
+scan  generated=2026-11-11T04:52:32Z  budget=$10.00  horizon=30d  zone=America/Chicago
+modeled sides=365  clear=128  verify=30  econ events=31  short-dated=941
+edges that clear costs (128); showing the best 12. The rest are in --json.
+  KXCPIYOY-26NOV-T3.9  YES  CPI, year over year: Above 3.9%  ask 0.1800  model 0.481  brkeven 0.190  edge +29.1pp  settles 2026-12-10 09:00 CST  -
+    Cleveland Fed year-over-year nowcast (CPI Inflation) 3.94 for 2026-11 as of 11/10, sd 0.31 from 158 finished months (mean error +0.04 left in); P(one-decimal print > 3.9)
+  KXCPI-26NOV-T0.1  YES  CPI, month over month: Above 0.1%  ask 0.1800  model 0.473  brkeven 0.190  edge +28.3pp  settles 2026-12-10 08:56 CST  -
+    Cleveland Fed month-over-month nowcast (CPI Inflation) 0.14 for 2026-11 as of 11/10, sd 0.22 from 158 finished months (mean error +0.03 left in); P(one-decimal print > 0.1)
+  KXCPIYOY-26NOV-T3.8  YES  CPI, year over year: Above 3.8%  ask 0.3100  model 0.608  brkeven 0.325  edge +28.3pp  settles 2026-12-10 09:00 CST  -
+    Cleveland Fed year-over-year nowcast (CPI Inflation) 3.94 for 2026-11 as of 11/10, sd 0.31 from 158 finished months (mean error +0.04 left in); P(one-decimal print > 3.8)
+  KXCPIYOY-26NOV-T4.0  YES  CPI, year over year: Above 4.0%  ask 0.1300  model 0.357  brkeven 0.138  edge +21.9pp  settles 2026-12-10 09:00 CST  THIN
+    Cleveland Fed year-over-year nowcast (CPI Inflation) 3.94 for 2026-11 as of 11/10, sd 0.31 from 158 finished months (mean error +0.04 left in); P(one-decimal print > 4)
+  KXCPI-26NOV-T0.2  YES  CPI, month over month: Above 0.2%  ask 0.0900  model 0.304  brkeven 0.096  edge +20.8pp  settles 2026-12-10 08:56 CST  THIN
+    Cleveland Fed month-over-month nowcast (CPI Inflation) 0.14 for 2026-11 as of 11/10, sd 0.22 from 158 finished months (mean error +0.03 left in); P(one-decimal print > 0.2)
+  KXCPI-26NOV-T0.0  YES  CPI, month over month: Above 0.0%  ask 0.4300  model 0.648  brkeven 0.447  edge +20.1pp  settles 2026-12-10 08:56 CST  -
+    Cleveland Fed month-over-month nowcast (CPI Inflation) 0.14 for 2026-11 as of 11/10, sd 0.22 from 158 finished months (mean error +0.03 left in); P(one-decimal print > 0)
+  KXHIGHDEN-26NOV11-B61.5  YES  Denver: 61° to 62°  ask 0.0200  model 0.218  brkeven 0.021  edge +19.7pp  settles 2026-11-12 14:00 CST  THIN
+    NWS hourly high 63F at KDEN (Denver, Denver International Airport), lead 16h, bias +0.2F, sd 3.5F, student-t df 6 (fit n=695 (KDEN) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum)
+  KXCPIYOY-26NOV-T4.1  YES  CPI, year over year: Above 4.1%  ask 0.0500  model 0.246  brkeven 0.053  edge +19.2pp  settles 2026-12-10 09:00 CST  -
+    Cleveland Fed year-over-year nowcast (CPI Inflation) 3.94 for 2026-11 as of 11/10, sd 0.31 from 158 finished months (mean error +0.04 left in); P(one-decimal print > 4.1)
+  KXCPICORE-26NOV-T0.1  NO  core CPI, month over month: Above 0.1%  ask 0.0500  model 0.244  brkeven 0.053  edge +19.0pp  settles 2026-12-10 09:00 CST  -
+    Cleveland Fed month-over-month nowcast (Core CPI Inflation) 0.21 for 2026-11 as of 11/10, sd 0.16 from 158 finished months (mean error +0.00 left in); P(unrounded change > 0.1); the rules do not say the print is one-decimal
+  KXHIGHTOKC-26NOV11-B68.5  YES  Oklahoma City: 68° to 69°  ask 0.0400  model 0.231  brkeven 0.043  edge +18.8pp  settles 2026-11-12 14:00 CST  THIN
+    NWS hourly high 70F at KOKC (Oklahoma City, Will Rogers World Airport), lead 16h, bias +0.3F, sd 3.0F, student-t df 6 (fit n=272 (KOKC) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum)
+  KXHIGHLAX-26NOV11-B89.5  YES  Los Angeles: 89° to 90°  ask 0.0100  model 0.197  brkeven 0.011  edge +18.6pp  settles 2026-11-12 14:00 CST  NOBID
+    NWS hourly high 86F at KLAX (Los Angeles, Los Angeles International Airport), lead 15h, bias +1.2F, sd 2.8F, student-t df 6 (fit n=660 (KLAX) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum)
+  KXHIGHDEN-26NOV11-T61  YES  Denver: 60° or below  ask 0.0100  model 0.196  brkeven 0.011  edge +18.5pp  settles 2026-11-12 14:00 CST  NOBID,THIN
+    NWS hourly high 63F at KDEN (Denver, Denver International Airport), lead 16h, bias +0.2F, sd 3.5F, student-t df 6 (fit n=695 (KDEN) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum)
+model disagrees strongly, verify (30), not ranked as edges:
+  showing 8; the rest are in --json.
+  KXHIGHLAX-26NOV11-T83  NO  Los Angeles: 82° or below  ask 0.4400  model 0.956  brkeven 0.458  edge +49.9pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 86F at KLAX (Los Angeles, Los Angeles International Airport), lead 15h, bias +1.2F, sd 2.8F, student-t df 6 (fit n=660 (KLAX) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHTHOU-26NOV11-T76  NO  Houston: 75° or below  ask 0.1400  model 0.627  brkeven 0.149  edge +47.8pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 76F at KHOU (Houston, Houston Hobby Airport), lead 16h, bias +0.3F, sd 2.9F, student-t df 6 (fit n=272 (KHOU) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHTSDF-26NOV11-B71.5  NO  Louisville: 71° to 72°  ask 0.4100  model 0.874  brkeven 0.427  edge +44.7pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 68F at KSDF (Louisville Muhammad Ali International Airport), lead 15h, bias +0.1F, sd 3.1F, student-t df 6 (fit n=74 (KSDF) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHTOKC-26NOV11-B72.5  NO  Oklahoma City: 72° to 73°  ask 0.3800  model 0.802  brkeven 0.397  edge +40.5pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 70F at KOKC (Oklahoma City, Will Rogers World Airport), lead 16h, bias +0.3F, sd 3.0F, student-t df 6 (fit n=272 (KOKC) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHDEN-26NOV11-B65.5  NO  Denver: 65° to 66°  ask 0.4000  model 0.816  brkeven 0.417  edge +39.9pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 63F at KDEN (Denver, Denver International Airport), lead 16h, bias +0.2F, sd 3.5F, student-t df 6 (fit n=695 (KDEN) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHTDAL-26NOV11-B80.5  NO  Dallas: 80° to 81°  ask 0.3100  model 0.706  brkeven 0.325  edge +38.1pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 80F at KDFW (Dallas/Fort Worth International Airport), lead 16h, bias +1.3F, sd 2.9F, student-t df 6 (fit n=272 (KDFW) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHTLV-26NOV11-B76.5  NO  Las Vegas: 76° to 77°  ask 0.2800  model 0.648  brkeven 0.294  edge +35.4pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 76F at KLAS (Harry Reid International Airport), lead 17h, bias -0.3F, sd 2.3F, student-t df 6 (fit n=300 (KLAS) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+  KXHIGHTPHX-26NOV11-B83.5  NO  Phoenix: 83° to 84°  ask 0.3200  model 0.686  brkeven 0.336  edge +35.0pp  settles 2026-11-12 14:00 CST  VERIFY
+    NWS hourly high 84F at KPHX (Phoenix, Phoenix Sky Harbor International Airport), lead 17h, bias +0.7F, sd 2.3F, student-t df 6 (fit n=279 (KPHX) / 10155 pooled at 24h, Open-Meteo GFS seamless previous-day hourly maximum) model disagrees strongly, verify
+```
+
+The economic releases and the short-dated list from this same run are omitted here.
+
+```text
 notes:
-  - weather probabilities use an assumed lead-time sd, not a fit to Kalshi settlements
-  - 24 events had no remaining afternoon hour in the NWS forecast (the high is already outside it), including KXHIGHAUS-26NOV10
+  - weather error fit to Open-Meteo GFS seamless previous-day hourly maximum: 24h pooled bias +1.10F, sd 3.10F, student-t df 6, n=10155 city-days. Applied bias is 100% of that fit. A model-minus-ask gap of 20% or more is flagged verify and not ranked; weather also needs 3% of extra margin over the fee break-even
+  - 24 events were not priced because the NWS hourly grid no longer contains the calendar-day high, including KXHIGHAUS-26NOV10
 read this honestly:
   - an edge means the model probability beats the break-even of a $10 taker order at the ask
   - the spread is already in that break-even: you pay the ask, and the spread is not added again
-  - weather sd is an assumption about NWS high-temperature error by lead time, not a fit to settlements
+  - weather bias and sd come from weather_calibration.json; a missing fit is not ranked as an edge
+  - a weather gap at least as large as the disagree guard is flagged VERIFY and is not an edge
+  - weather also has to beat the fee break-even by the fit's extra margin
   - CPI uses the Cleveland Fed nowcast and that file's own errors; payrolls, claims, and the Fed are price only
   - THIN: 24h volume under 50, open interest under 20, or ask size below the order; WIDE: spread over 5 cents
   - NOBID: the bid is missing or zero. A thin quote can clear this bar and still be untradable at $10
   - this tool never places an order
 ```
 
-How to read this run (03:19 UTC on Nov 11, which is about 9:19pm Central on Nov 10, so the Nov 11 highs are still ahead and the Nov 10 highs are not):
+How to read this run:
 
-- **180 sides cleared the fee.** 136 of them are weather and 44 are November CPI (headline and core, month-over-month and year-over-year). Payrolls, unemployment, claims, and both Fed series cleared nothing, because they have no model. The text shows the 12 largest gaps. The other 168 are in the JSON from the same run.
-- **The 12 are one assumption, repeated.** Dallas is the plain case: the NWS hourly high at DFW is 80°F and the 80–81° bracket is offered at a NO ask of 0.31. A normal with a 3.2°F standard deviation only puts about a quarter of the probability on a two-degree bin, so NO is scored at 0.76 and the edge is +43 points. Los Angeles is a different gap: the forecast high is 86°F and NO on "82° or below" is offered at 0.38, which the same distribution scores at 0.86. Neither number has been checked against settled highs.
-- **The best CPI side did not make the printed 12.** In the JSON it is `KXCPIYOY-26NOV-T3.9` YES at 0.18, model 0.481, break-even 0.190, edge +29.1 points, no thin-book flag. The nowcast behind it is 3.94% year-over-year for November as of the Nov 10 file, with a standard deviation of 0.31 from 158 finished months. December CPI is listed and not modeled: the file's current month is November.
-- **Price only, on purpose.** Initial claims settle the morning of Nov 12 (the book's center is near 190,000). Payrolls and unemployment settle Dec 4. The Dec 9 Fed meeting is priced as a hike: "Hike 25bps" is a YES ask of 0.86 on heavy volume, and "Fed maintains rate" is a YES ask of 0.05. There is no probability next to either.
-- **The short list is not a bet.** The soonest technology markets are same-morning brackets on AI-gateway share. Most of those books are one-sided (`NOBID`, `WIDE`). They are dates and prices.
+- **128 sides cleared the fee. 86 are weather and 42 are November CPI.** The previous run, with the assumed width, had 136 weather sides in that list, and the top of it was NO on the market's favorite bin at about +40 points. Those NO lines are now under `model disagrees strongly, verify` (30 sides, not ranked). The printed top 12 is CPI, then weather YES at 1 to 4 cents.
+- **The weather sides that still clear are mostly a cheap tail.** 52 of the 86 are YES asks of 5 cents or less. 16 have no liquidity flag. The largest of those are NO on a neighboring bin at +12 to +17 points (Philadelphia, Washington, Oklahoma City), under the 20-point guard. The noon-price Brier above says the market has been the better probability, so these are questions, not a buy list.
+- **Verify is the old failure mode, labeled.** Los Angeles NO on "82° or below" is model 0.956 against an ask of 0.44, edge +49.9 points, and it is not in the ranked list. The why line names the fit: NWS 86°F, bias +1.2°F, sd 2.8°F, Student-t with 6 degrees of freedom, from the GFS archive, not from a historical NWS grid.
+- **CPI is unchanged.** The best CPI side is still `KXCPIYOY-26NOV-T3.9` YES at 0.18, model 0.481, edge +29.1 points. Payrolls, unemployment, claims, and the Fed are price only.
 - **Nov 10 was not priced.** Twenty-four city events were still open and were skipped, because the afternoon had already left the NWS hourly forecast.
-
 
 ### Sample comparison output
 
@@ -522,7 +431,7 @@ Candlesticks (`GET /series/{series_ticker}/markets/{ticker}/candlesticks`) and t
 
 ## Database
 
-SQLite, schema version 3 in `schema_meta`. Older files are upgraded in place on open: a version 1 file gains two columns on `markets` (they stay `NULL` until the next `settled` run rewrites each row), and the version 3 tables are created when missing.
+SQLite, schema version 4 in `schema_meta`. Older files are upgraded in place on open: a version 1 file gains two columns on `markets` (they stay `NULL` until the next `settled` run rewrites each row), and later tables are created when missing. Version 4 adds `nws_forecasts` (the hourly max each scan priced), `weather_days` (settled daily highs), `archive_forecasts` (the Open-Meteo highs they were paired with), and `weather_brackets` (the ladder the noon-price score uses).
 
 `markets` — one row per ticker. Reruns update the row. `occurrence_datetime` and `expected_expiration_time` are the event timing fields the backtest reads. `source` is `live` or `historical`. A live row that already has a `result` is kept when the same ticker also shows up in the archive. A snapshot of a market that had not resolved yet does not block a later historical settlement: after Kalshi archives the contract, that archive row is the only copy of the payoff. The open-market price snapshot stays either way.
 
@@ -563,7 +472,7 @@ WHERE series_ticker = 'KXNFLGAME'
 pytest
 ```
 
-The tests parse fixture payloads (a candlestick history and an Odds API response in `tests/fixtures/`) and talk to fake HTTP sessions. They call neither Kalshi, nor The Odds API, nor the National Weather Service, nor the Cleveland Fed. The fee tests check the formula against the worked examples in Kalshi's fee schedule; the de-vig and EV tests check the worked examples in the design doc; the client tests trigger failures with a fake key and assert it never appears in an exception or a log line; the compare test runs the whole pipeline on a fixture database and checks the printed table. The scan tests check the temperature brackets, the assumed lead-time error, the nowcast parser on a small chart, and a full report built from fake pages, including the case where nothing clears the fee.
+The tests parse fixture payloads (a candlestick history, an Open-Meteo previous-run payload, and an Odds API response in `tests/fixtures/`) and talk to fake HTTP sessions. They call neither Kalshi, nor The Odds API, nor the National Weather Service, nor Open-Meteo, nor the Cleveland Fed. The fee tests check the formula against the worked examples in Kalshi's fee schedule; the de-vig and EV tests check the worked examples in the design doc; the client tests trigger failures with a fake key and assert it never appears in an exception or a log line; the compare test runs the whole pipeline on a fixture database and checks the printed table. The scan tests check the temperature brackets, the fitted error and the guard that keeps a huge weather gap out of the ranked list, the nowcast parser on a small chart, and a full report built from fake pages, including the case where nothing clears the fee.
 
 `ruff check .` and `pytest` run in GitHub Actions on every push and pull request, along with `gitleaks` for committed secrets. `.pre-commit-config.yaml` runs the same secret scan locally for anyone who installs [pre-commit](https://pre-commit.com).
 

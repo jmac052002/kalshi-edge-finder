@@ -1,0 +1,271 @@
+{
+  "bias_transfer": 1.0,
+  "df": 6.0,
+  "disagree_gap": 0.2,
+  "distribution": "student_t",
+  "extra_margin": 0.03,
+  "fitted_at": "2026-11-11T04:52:20Z",
+  "leads": {
+    "24": {
+      "bias_f": 1.1015854258985722,
+      "mae_f": 2.3183162332928724,
+      "n": 10155,
+      "scale_f": 2.531051344430824,
+      "sd_f": 3.0998921533204378
+    },
+    "48": {
+      "bias_f": 0.12323680063041771,
+      "mae_f": 2.886720710449396,
+      "n": 10152,
+      "scale_f": 3.131148391200629,
+      "sd_f": 3.834857933688995
+    }
+  },
+  "reference_lead_hours": 24,
+  "rejected_outliers": 1,
+  "scores": {
+    "abs_gap_p95": 0.4889351425987177,
+    "brier": {
+      "assumed": 0.14073557542964793,
+      "calibrated": 0.13228326767299758,
+      "market": 0.07710722434561038
+    },
+    "log_loss": {
+      "assumed": 0.4455550087750178,
+      "calibrated": 0.423577551683277,
+      "market": 0.2410481003782816
+    },
+    "n_contracts": 8634,
+    "n_winning_bins": 1439,
+    "out_of_sample": true,
+    "split_date": "2026-09-11",
+    "winning_bin_log_loss": {
+      "assumed": 1.7250732206402601,
+      "calibrated": 1.6346884592172772,
+      "market": 0.8097146453250006
+    }
+  },
+  "shrink_k": 15.0,
+  "source_label": "Open-Meteo GFS seamless previous-day hourly maximum",
+  "source_note": "api.weather.gov serves only the current forecast, so this fit does not use historical NWS grids. Each settled KXHIGH daily high (Kalshi expiration_value when the exchange sends one, otherwise the midpoint of the winning two-degree bin; winning tails are dropped because they do not name a temperature) is paired with the Open-Meteo Previous Runs API, model gfs_seamless (https://open-meteo.com/en/docs/previous-runs-api). temperature_2m_previous_day1 is the temperature that run predicted 24 hours before the valid hour, and previous_day2 is 48 hours before. The forecast high is the max of those hourly values on the station's local calendar date, the same reduction the scan applies to the live NWS hourly grid. The day-0 series is a short lead and is not used. Bias is the mean of settlement minus that GFS high, and the scan adds it to the live NWS high. That transfers a GFS bias onto the NWS, and it is the wrong correction if the two forecasts do not share one. Once nws_forecasts has enough settled days, a refit uses those stored NWS highs instead. The quote in the Brier and log-loss comparison is the last two-sided hourly candle at or before local noon on the market date: after the 24-hour forecast existed, and before the usual afternoon high. That comparison fits on days before Kalshi's historical cutoff and scores quotes after it.",
+  "stations": {
+    "KATL": {
+      "bias_f": 0.9742305489404033,
+      "n": 279,
+      "place": "Atlanta",
+      "raw_bias_f": 0.9673835125448028,
+      "raw_sd_f": 3.2436397033349635,
+      "scale_f": 2.6425586956852376,
+      "sd_f": 3.2364602098917414
+    },
+    "KAUS": {
+      "bias_f": 2.131194367268614,
+      "n": 1018,
+      "place": "Austin",
+      "raw_bias_f": 2.1463654223968565,
+      "raw_sd_f": 2.973599263221746,
+      "scale_f": 2.4294623006069846,
+      "sd_f": 2.9754714929076154
+    },
+    "KBOS": {
+      "bias_f": 1.1750814431112278,
+      "n": 277,
+      "place": "Boston",
+      "raw_bias_f": 1.179061371841155,
+      "raw_sd_f": 3.1503844692657537,
+      "scale_f": 2.5701764453999827,
+      "sd_f": 3.147810420075093
+    },
+    "KDCA": {
+      "bias_f": -0.21060264922822503,
+      "n": 294,
+      "place": "Washington DC",
+      "raw_bias_f": -0.27755102040816365,
+      "raw_sd_f": 3.0985363916574515,
+      "scale_f": 2.529998117492674,
+      "sd_f": 3.098602219029527
+    },
+    "KDEN": {
+      "bias_f": 0.15566729773025154,
+      "n": 695,
+      "place": "Denver",
+      "raw_bias_f": 0.13525179856115113,
+      "raw_sd_f": 3.530135054468674,
+      "scale_f": 2.8753653623522895,
+      "sd_f": 3.521588980917984
+    },
+    "KDFW": {
+      "bias_f": 1.311232687764734,
+      "n": 272,
+      "place": "Dallas",
+      "raw_bias_f": 1.322794117647059,
+      "raw_sd_f": 2.8856808187521965,
+      "scale_f": 2.3656100767641726,
+      "sd_f": 2.897268809229183
+    },
+    "KEWR": {
+      "bias_f": 1.5727888064667979,
+      "n": 76,
+      "place": "Newark",
+      "raw_bias_f": 1.665789473684211,
+      "raw_sd_f": 2.5022418018824073,
+      "scale_f": 2.1312127230902513,
+      "sd_f": 2.610191852449288
+    },
+    "KHOU": {
+      "bias_f": 0.2941595170330267,
+      "n": 272,
+      "place": "Houston",
+      "raw_bias_f": 0.24963235294117675,
+      "raw_sd_f": 2.8550854241976773,
+      "scale_f": 2.342036918058103,
+      "sd_f": 2.868397704001425
+    },
+    "KLAS": {
+      "bias_f": -0.33770228130641694,
+      "n": 300,
+      "place": "Las Vegas",
+      "raw_bias_f": -0.4096666666666665,
+      "raw_sd_f": 2.2358450825132956,
+      "scale_f": 1.8652153884066738,
+      "sd_f": 2.2844129809917444
+    },
+    "KLAX": {
+      "bias_f": 1.2201833798347832,
+      "n": 660,
+      "place": "Los Angeles",
+      "raw_bias_f": 1.222878787878788,
+      "raw_sd_f": 2.822773346042956,
+      "scale_f": 2.3100537218058506,
+      "sd_f": 2.829226448420768
+    },
+    "KMDW": {
+      "bias_f": 1.4140734315779833,
+      "n": 1017,
+      "place": "Chicago Midway, IL",
+      "raw_bias_f": 1.4186823992133728,
+      "raw_sd_f": 3.232244812809817,
+      "scale_f": 2.6375778288452185,
+      "sd_f": 3.2303599187743437
+    },
+    "KMIA": {
+      "bias_f": 1.866432898352722,
+      "n": 1024,
+      "place": "Miami International Airport",
+      "raw_bias_f": 1.8776367187499996,
+      "raw_sd_f": 2.316580948967178,
+      "scale_f": 1.9022443220455192,
+      "sd_f": 2.3297639775590198
+    },
+    "KMSP": {
+      "bias_f": 0.6068836101648933,
+      "n": 279,
+      "place": "Minneapolis",
+      "raw_bias_f": 0.5802867383512548,
+      "raw_sd_f": 3.4276182436146807,
+      "scale_f": 2.7856085101278145,
+      "sd_f": 3.4116597364838057
+    },
+    "KMSY": {
+      "bias_f": 0.6559485123443768,
+      "n": 300,
+      "place": "New Orleans",
+      "raw_bias_f": 0.6336666666666669,
+      "raw_sd_f": 2.6849699129911646,
+      "scale_f": 2.2095794330529466,
+      "sd_f": 2.7061710785639312
+    },
+    "KNYC": {
+      "bias_f": 0.7719189426260622,
+      "n": 1024,
+      "place": "New York City",
+      "raw_bias_f": 0.76708984375,
+      "raw_sd_f": 3.45269681211335,
+      "scale_f": 2.8151660871885023,
+      "sd_f": 3.447860227399645
+    },
+    "KOKC": {
+      "bias_f": 0.26349749612710327,
+      "n": 272,
+      "place": "Oklahoma City",
+      "raw_bias_f": 0.2172794117647061,
+      "raw_sd_f": 3.0178734398186338,
+      "scale_f": 2.467628426605725,
+      "sd_f": 3.0222152599854577
+    },
+    "KPHL": {
+      "bias_f": 1.949138626394056,
+      "n": 712,
+      "place": "Philadelphia International Airport",
+      "raw_bias_f": 1.966994382022472,
+      "raw_sd_f": 2.9136842782128642,
+      "scale_f": 2.3822482521704544,
+      "sd_f": 2.917646329227341
+    },
+    "KPHX": {
+      "bias_f": 0.6959992564233966,
+      "n": 279,
+      "place": "Phoenix",
+      "raw_bias_f": 0.6741935483870969,
+      "raw_sd_f": 2.284538422555175,
+      "scale_f": 1.9049245643557982,
+      "sd_f": 2.3330465905826205
+    },
+    "KSAN": {
+      "bias_f": 1.146161034576312,
+      "n": 83,
+      "place": "San Diego",
+      "raw_bias_f": 1.1542168674698794,
+      "raw_sd_f": 2.373137328867261,
+      "scale_f": 2.0397041524026616,
+      "sd_f": 2.4981171998112877
+    },
+    "KSAT": {
+      "bias_f": 0.8614069037926082,
+      "n": 272,
+      "place": "San Antonio",
+      "raw_bias_f": 0.8481617647058822,
+      "raw_sd_f": 2.61091879946996,
+      "scale_f": 2.1545058250731652,
+      "sd_f": 2.638719959641663
+    },
+    "KSDF": {
+      "bias_f": 0.142963835825602,
+      "n": 74,
+      "place": "Louisville",
+      "raw_bias_f": -0.05135135135135141,
+      "raw_sd_f": 3.1195470009761865,
+      "scale_f": 2.5444018138224527,
+      "sd_f": 3.1162430722385053
+    },
+    "KSEA": {
+      "bias_f": 1.1019802583761225,
+      "n": 300,
+      "place": "Seattle",
+      "raw_bias_f": 1.102,
+      "raw_sd_f": 3.1340394612195945,
+      "scale_f": 2.557611722345858,
+      "sd_f": 3.132421839954098
+    },
+    "KSFO": {
+      "bias_f": 0.7353135917094559,
+      "n": 300,
+      "place": "San Francisco",
+      "raw_bias_f": 0.717,
+      "raw_sd_f": 3.835053644324874,
+      "scale_f": 3.105356664632586,
+      "sd_f": 3.80326964885045
+    },
+    "KTTN": {
+      "bias_f": 1.666195399873391,
+      "n": 76,
+      "place": "Trenton",
+      "raw_bias_f": 1.7776315789473685,
+      "raw_sd_f": 2.133454081012637,
+      "scale_f": 1.8947847654030265,
+      "sd_f": 2.3206279238182717
+    }
+  },
+  "trusted": true,
+  "version": 1
+}

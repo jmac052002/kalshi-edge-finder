@@ -5,8 +5,9 @@ One command, three jobs:
 * Daily city-high temperature markets. The series come from ``GET /series``
   (climate, daily, tagged "Daily temperature", ticker starting with
   ``KXHIGH``). The settlement station comes from the market rules, not from
-  the series title. The probability is a normal distribution around the NWS
-  hourly forecast high. The width is an assumption; see ``kalshi_edge.weather``.
+  the series title. The probability is a normal or Student-t distribution
+  around the NWS hourly forecast high, shifted by the bias in
+  ``weather_calibration.json``. See ``kalshi_edge.weather_error``.
 * Economic releases the owner asked about: CPI, the jobs report, initial
   claims, and the Fed decision. CPI and core CPI, month-over-month and
   year-over-year, get a probability from the Cleveland Fed nowcast when that
@@ -42,7 +43,7 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -69,13 +70,18 @@ from kalshi_edge.parse import (
 )
 from kalshi_edge.store import MarketStore
 from kalshi_edge.weather import (
-    assumed_sigma_f,
     event_date,
     is_daily_high_series,
     normal_cdf,
     nws_station_id,
     settlement_place,
     temperature_yes_probability,
+)
+from kalshi_edge.weather_error import (
+    WeatherCalibration,
+    judge_weather_edge,
+    load_calibration,
+    predict_high,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +100,7 @@ THIN_OPEN_INTEREST = 20.0
 WIDE_SPREAD = Decimal("0.05")
 CLOSEST_LIMIT = 8
 EDGE_PRINT_LIMIT = 12
+VERIFY_PRINT_LIMIT = 8
 SHORT_PRINT_LIMIT = 12
 SHORT_KEEP_LIMIT = 200
 ECON_STRIKE_LIMIT = 6
@@ -157,7 +164,9 @@ ECON_SERIES: tuple[tuple[str, str, str | None, str], ...] = (
 CAVEATS = (
     "an edge means the model probability beats the break-even of a $10 taker order at the ask",
     "the spread is already in that break-even: you pay the ask, and the spread is not added again",
-    "weather sd is an assumption about NWS high-temperature error by lead time, not a fit to settlements",
+    "weather bias and sd come from weather_calibration.json; a missing fit is not ranked as an edge",
+    "a weather gap at least as large as the disagree guard is flagged VERIFY and is not an edge",
+    "weather also has to beat the fee break-even by the fit's extra margin",
     "CPI uses the Cleveland Fed nowcast and that file's own errors; payrolls, claims, and the Fed are price only",
     "THIN: 24h volume under 50, open interest under 20, or ask size below the order; WIDE: spread over 5 cents",
     "NOBID: the bid is missing or zero. A thin quote can clear this bar and still be untradable at $10",
@@ -229,6 +238,13 @@ class Report:
     @property
     def clears(self) -> list[ScanRow]:
         return [row for row in self.modeled if row.clears]
+
+    @property
+    def verify(self) -> list[ScanRow]:
+        """Weather sides the model and the ask disagree on by too much to rank."""
+        rows = [row for row in self.modeled if "VERIFY" in row.flags]
+        rows.sort(key=lambda row: (-(row.edge if row.edge is not None else -2.0), row.ticker, row.side))
+        return rows
 
     @property
     def nothing_clears(self) -> bool:
@@ -525,12 +541,35 @@ def _active(markets: list[dict]) -> list[dict]:
     return kept
 
 
+def _apply_weather_guard(row: ScanRow, calibration: WeatherCalibration, *, trusted: bool) -> ScanRow:
+    """Fee break-even stays. A huge gap, or an unfitted width, is not ranked."""
+    ask = float(row.ask) if row.ask is not None else None
+    clears, verify, note = judge_weather_edge(
+        probability=row.model,
+        ask=ask,
+        break_even=row.break_even,
+        trusted=trusted,
+        extra_margin=calibration.extra_margin,
+        disagree_gap=calibration.disagree_gap,
+    )
+    flags = row.flags
+    why = row.why
+    if verify and "VERIFY" not in flags:
+        flags = flags + ("VERIFY",)
+    if note and note not in why:
+        why = f"{why} {note}"
+    if clears == row.clears and flags == row.flags and why == row.why:
+        return row
+    return replace(row, clears=clears, flags=flags, why=why)
+
+
 def _scan_weather(
     *,
     client: KalshiClient,
     store: MarketStore,
     catalog: dict[str, dict],
     forecasts: NwsForecasts,
+    calibration: WeatherCalibration,
     now: datetime,
     horizon: timedelta,
     budget: Decimal,
@@ -587,20 +626,41 @@ def _scan_weather(
                 else:
                     notes.append(f"{event_ticker}: {reason}")
                 continue
-            sigma = assumed_sigma_f(high.lead_hours)
+            store.save_nws_forecast(
+                event_ticker=event_ticker,
+                captured_at=fetched_at,
+                series_ticker=ticker,
+                station_id=station,
+                market_date=day.isoformat(),
+                forecast_high_f=high.temperature_f,
+                lead_hours=high.lead_hours,
+                valid_time=high.at.isoformat(),
+                station_name=high.station_name,
+            )
+            prediction = predict_high(calibration, station, high.lead_hours, high.temperature_f)
             yes_probs: list[float] = []
             place_name = high.station_name or place
-            why = (
-                f"NWS hourly high {high.temperature_f:.0f}F at {station} ({place_name}), "
-                f"lead {high.lead_hours:.0f}h, assumed sd {sigma:.1f}F (not fit to settlements)"
-            )
+            tail = f", student-t df {prediction.df:.0f}" if prediction.df is not None else ""
+            if prediction.trusted:
+                why = (
+                    f"NWS hourly high {high.temperature_f:.0f}F at {station} ({place_name}), "
+                    f"lead {high.lead_hours:.0f}h, bias {prediction.bias_f:+.1f}F, "
+                    f"sd {prediction.sd_f:.1f}F{tail} ({prediction.detail})"
+                )
+            else:
+                why = (
+                    f"NWS hourly high {high.temperature_f:.0f}F at {station} ({place_name}), "
+                    f"lead {high.lead_hours:.0f}h, assumed sd {prediction.sd_f:.1f}F "
+                    "(no settlement fit; not ranked as an edge)"
+                )
             for market in event_markets:
                 probability = temperature_yes_probability(
-                    high.temperature_f,
-                    sigma,
+                    prediction.mean_f,
+                    prediction.scale_f,
                     strike_type=market.get("strike_type") if isinstance(market.get("strike_type"), str) else None,
                     floor=_float_or_none(market.get("floor_strike")),
                     cap=_float_or_none(market.get("cap_strike")),
+                    df=prediction.df,
                 )
                 if probability is None:
                     notes.append(
@@ -612,17 +672,18 @@ def _scan_weather(
                 subtitle = market.get("yes_sub_title") or market.get("title") or ""
                 title = f"{place}: {subtitle}"
                 try:
+                    priced = _price_sides(
+                        market,
+                        yes_probability=probability,
+                        fee=fee,
+                        budget=budget,
+                        why=why,
+                        title=title,
+                        settles=settles,
+                        series_ticker=ticker,
+                    )
                     rows.extend(
-                        _price_sides(
-                            market,
-                            yes_probability=probability,
-                            fee=fee,
-                            budget=budget,
-                            why=why,
-                            title=title,
-                            settles=settles,
-                            series_ticker=ticker,
-                        )
+                        _apply_weather_guard(row, calibration, trusted=prediction.trusted) for row in priced
                     )
                 except (UnknownFeeTypeError, ValueError) as exc:
                     notes.append(f"{ticker}: {exc}")
@@ -886,6 +947,7 @@ def run(
     now: datetime,
     generated_at: str,
     forecasts: NwsForecasts | None = None,
+    calibration: WeatherCalibration | None = None,
     month_charts: object | None = None,
     year_charts: object | None = None,
     nowcast_client: KalshiClient | None = None,
@@ -906,9 +968,9 @@ def run(
     if horizon_days < 1:
         raise ValueError("horizon_days must be >= 1")
     horizon = timedelta(days=horizon_days)
-    notes: list[str] = [
-        "weather probabilities use an assumed lead-time sd, not a fit to Kalshi settlements",
-    ]
+    if calibration is None:
+        calibration = load_calibration()
+    notes: list[str] = [calibration.scan_note()]
     catalog_rows = client.list_series()
     catalog = {
         str(entry["ticker"]): entry
@@ -955,6 +1017,7 @@ def run(
             store=store,
             catalog=catalog,
             forecasts=forecasts,
+            calibration=calibration,
             now=now,
             horizon=horizon,
             budget=budget,
@@ -1028,6 +1091,7 @@ def format_report(report: Report, *, short_limit: int = SHORT_PRINT_LIMIT) -> st
         ),
         (
             f"modeled sides={len(report.modeled)}  clear={len(report.clears)}  "
+            f"verify={len(report.verify)}  "
             f"econ events={len(report.econ_events)}  "
             f"short-dated={report.short_dated_total}"
         ),
@@ -1045,10 +1109,22 @@ def format_report(report: Report, *, short_limit: int = SHORT_PRINT_LIMIT) -> st
             lines.append(f"edges that clear costs ({len(report.clears)}), best first:")
         for row in shown_edges:
             lines.extend(_format_modeled(row))
+    if report.verify:
+        shown_verify = report.verify[:VERIFY_PRINT_LIMIT]
+        lines.append(
+            f"model disagrees strongly, verify ({len(report.verify)}), not ranked as edges:"
+        )
+        if len(report.verify) > VERIFY_PRINT_LIMIT:
+            lines.append(f"  showing {len(shown_verify)}; the rest are in --json.")
+        for row in shown_verify:
+            lines.extend(_format_modeled(row))
     # Near misses matter when nothing cleared. When many sides clear, the top of
     # that list is the daily read and the near misses are noise under it.
+    # VERIFY rows are already listed above; they are not near misses.
     if report.nothing_clears:
-        closest = [row for row in report.modeled if not row.clears][:CLOSEST_LIMIT]
+        closest = [
+            row for row in report.modeled if not row.clears and "VERIFY" not in row.flags
+        ][:CLOSEST_LIMIT]
         if closest:
             lines.append("closest modeled, do not clear costs:")
             for row in closest:
@@ -1153,6 +1229,7 @@ def report_to_json(report: Report) -> str:
     assert isinstance(data, dict)
     data["nothing_clears"] = report.nothing_clears
     data["clear_count"] = len(report.clears)
+    data["verify_count"] = len(report.verify)
     data["caveats"] = list(CAVEATS)
     return json.dumps(data, indent=2, sort_keys=True)
 

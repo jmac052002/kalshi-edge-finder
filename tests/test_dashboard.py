@@ -441,7 +441,8 @@ def test_large_edges_get_a_caution_and_ordinary_ones_do_not(paths):
     paths["scan"].write_text(scan.report_to_json(_scan_report(edges=(0.40, 0.012, -0.1))), encoding="utf-8")
     page = _build(paths)
     assert "1 of the 2 clearing sides show an edge over 10 pp" in page
-    assert "not been fit to settlements" in page
+    assert "not an NWS error" in page
+    assert "Student-t" in page
     # A large edge on a side that does not clear is not what the caution counts.
     paths["scan"].write_text(scan.report_to_json(_scan_report(edges=(0.02, 0.012, 0.9))), encoding="utf-8")
     assert "clearing sides show an edge over" not in _build(paths)
