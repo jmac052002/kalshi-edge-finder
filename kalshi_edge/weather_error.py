@@ -67,6 +67,7 @@ class ErrorPair:
     settlement_f: float
     market_date: date | None = None
     place: str | None = None
+    event_ticker: str | None = None
 
     @property
     def error_f(self) -> float:

@@ -23,7 +23,7 @@ import logging
 import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -360,8 +360,22 @@ def _bucket_stored_lead(lead_hours: float) -> int | None:
     return None
 
 
+def _field(row: object, key: str) -> object:
+    """Read one column from a dict or a ``sqlite3.Row``.
+
+    ``Row`` supports indexing and ``keys()`` and does not implement ``get``.
+    The scan stores NWS highs as rows, and a refit reads them back that way.
+    """
+    if isinstance(row, Mapping):
+        return row.get(key)
+    try:
+        return row[key]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def nws_pairs_from_rows(
-    forecasts: Iterable[Mapping],
+    forecasts: Iterable[object],
     days: Iterable[SettledDay],
 ) -> list[ErrorPair]:
     """One stored NWS high per event per lead bucket, joined to the settlement.
@@ -372,15 +386,15 @@ def nws_pairs_from_rows(
     by_event = {day.event_ticker: day for day in days}
     best: dict[tuple[str, int], tuple[float, ErrorPair]] = {}
     for row in forecasts:
-        event = row.get("event_ticker")
+        event = _field(row, "event_ticker")
         if not isinstance(event, str):
             continue
         day = by_event.get(event)
         if day is None:
             continue
         try:
-            lead = float(row.get("lead_hours"))  # type: ignore[arg-type]
-            forecast = float(row.get("forecast_high_f"))  # type: ignore[arg-type]
+            lead = float(_field(row, "lead_hours"))  # type: ignore[arg-type]
+            forecast = float(_field(row, "forecast_high_f"))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
         bucket = _bucket_stored_lead(lead)
@@ -395,6 +409,7 @@ def nws_pairs_from_rows(
             settlement_f=day.high_f,
             market_date=day.market_date,
             place=day.place,
+            event_ticker=event,
         )
         key = (event, bucket)
         current = best.get(key)
@@ -912,6 +927,34 @@ def _score_brackets_for(
     return scored
 
 
+def brackets_for_source(
+    brackets: list[ScoreBracket],
+    pairs: list[ErrorPair],
+    label: str,
+) -> list[ScoreBracket]:
+    """Quotes scored against the forecast the fit was actually trained on.
+
+    GFS brackets already carry the GFS high. An NWS fit is not scored on
+    those highs. Only an event with a stored 24-hour NWS forecast is kept,
+    and that high replaces the one on the bracket. No such events means no
+    market comparison, rather than a comparison of the wrong forecast.
+    """
+    if label != NWS_SOURCE_LABEL:
+        return brackets
+    by_event = {
+        pair.event_ticker: pair.forecast_f
+        for pair in pairs
+        if pair.lead_hours == REFERENCE_LEAD_HOURS and pair.event_ticker
+    }
+    matched: list[ScoreBracket] = []
+    for bracket in brackets:
+        forecast = by_event.get(bracket.event_ticker)
+        if forecast is None:
+            continue
+        matched.append(replace(bracket, forecast_f=forecast))
+    return matched
+
+
 def build_calibration(
     *,
     gfs_pairs: list[ErrorPair],
@@ -923,12 +966,15 @@ def build_calibration(
 ) -> WeatherCalibration:
     """Fit on the chosen source, and score an earlier fit against later noon quotes."""
     pairs, label, note = select_training_pairs(gfs_pairs, nws_pairs)
+    scoring = brackets_for_source(brackets, pairs, label)
+    if label == NWS_SOURCE_LABEL and not scoring:
+        note += " No noon quote lined up with a stored NWS forecast, so this fit was not scored against the market."
     assumed = assumed_sigma_f(float(REFERENCE_LEAD_HOURS))
     scores: dict = {}
     disagree = 0.15
     if split_date is not None:
         early = [pair for pair in pairs if pair.market_date is not None and pair.market_date < split_date]
-        late_brackets = [bracket for bracket in brackets if bracket.market_date >= split_date]
+        late_brackets = [bracket for bracket in scoring if bracket.market_date >= split_date]
         early_fit = fit_error_model(
             early,
             fitted_at=fitted_at,
@@ -953,8 +999,8 @@ def build_calibration(
         disagree_gap=disagree,
         scores=scores,
     )
-    if not scores and brackets and full.trusted:
-        block = score_brackets(full, brackets, assumed_sigma=assumed)
+    if not scores and scoring and full.trusted:
+        block = score_brackets(full, scoring, assumed_sigma=assumed)
         block["out_of_sample"] = False
         block["split_date"] = None if split_date is None else split_date.isoformat()
         full = fit_error_model(
