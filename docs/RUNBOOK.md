@@ -4,7 +4,7 @@ Every command you need, in the order you need it, with the reason behind each on
 
 ## What you are running
 
-Three small Python tools share one SQLite file, `data/kalshi.db`. Nothing runs in the cloud and nothing places a bet.
+The tools share one SQLite file, `data/kalshi.db`. Nothing runs in the cloud and nothing places a bet.
 
 | Tool | Question it answers | Network |
 | --- | --- | --- |
@@ -12,6 +12,7 @@ Three small Python tools share one SQLite file, `data/kalshi.db`. Nothing runs i
 | `kalshi_edge.calibrate` | When Kalshi said 45%, did the event happen about 45% of the time? Would buying have made money after fees? | Kalshi candlesticks, no key |
 | `kalshi_edge.odds` | What are the sportsbooks (including Pinnacle) quoting for the same games? | The Odds API, needs your key, costs credits |
 | `kalshi_edge.compare` | After removing the book's margin and adding Kalshi's fee, is any contract cheaper than the book thinks it should be? | None; reads the database only |
+| `kalshi_edge.scan` | For a small short-dated account: which non-sports contracts, if any, beat the ask after fees? | Kalshi public API, api.weather.gov, Cleveland Fed nowcast files. No key |
 
 **Why one database file.** Every tool writes to or reads from the same SQLite file, so order matters: `calibrate` needs settled rows from `collect`, and `compare` needs both a Kalshi snapshot and an odds capture. The path `data/kalshi.db` is relative to where you run the command, so always run from the repository root, or you will create a second, empty database somewhere else and wonder where your data went.
 
@@ -117,7 +118,7 @@ Why this and not `export ODDS_API_KEY=abc123`: anything typed as a command lands
 
 The code reads the variable in exactly one place, hands it to the HTTP client, and that client scrubs `apiKey=` from every exception and log line it emits, so a pasted traceback is safe. The tests prove that with a fake key.
 
-## The four commands
+## The commands
 
 All commands run from the repository root with the venv active. Every one accepts `--help`, which is the source of truth when this document and the code disagree.
 
@@ -203,6 +204,27 @@ Takes the newest Kalshi snapshot and the newest odds capture, matches games by t
 | `--teams PATH` | `config/teams/nfl.json` | Team alias table; also names the sport. |
 | `--json PATH` | none | Also write the report as JSON. |
 
+### `scan` (free, daily)
+
+```bash
+python -m kalshi_edge.scan
+```
+
+One list for markets that are not NFL games. It needs no key. It calls the public Kalshi API, `api.weather.gov` (with a User-Agent), and the Cleveland Fed nowcast files. Weather contracts and the economic series are written into `data/kalshi.db` the same way `collect --mode snapshot` writes them. The short category list is printed and not stored.
+
+Read the first verdict before anything else. Either some sides have a model probability above the break-even of a $10 order at the ask, or the report says `nothing clears costs today`. Jobs, unemployment, initial claims, and the Fed decision are listed with price and settlement time only: there is no free consensus for them, and this command will not invent one. CPI is modeled only for the month the Cleveland Fed file is currently nowcasting.
+
+The run takes a few minutes. It pages every open event so it can tell which technology and AI series are actually listed, then reads those series. `--skip-short` drops that sweep and keeps weather and the economic releases. `--horizon-days 14` drops anything expected to settle further out than two weeks. Settlement times are in Central time.
+
+| Flag | Default | What it changes |
+| --- | --- | --- |
+| `--budget DOLLARS` | 10 | Order size the break-even is computed for, fee included. |
+| `--horizon-days N` | 30 | How soon a market has to settle to be ranked or listed. |
+| `--category NAME` | Science and Technology, Companies, AI | Repeat the flag to replace the short-dated categories. Series tagged AI are included either way, except sports and politics. |
+| `--skip-short` | off | Skip the category sweep. |
+| `--short-limit N` | 12 | How many short-dated events to print, one strike each. The JSON copy keeps the markets. |
+| `--json PATH` | none | Also write the report as JSON. |
+
 ## The routine
 
 **Every Tuesday, after Monday night's game settles:**
@@ -231,6 +253,16 @@ python -m kalshi_edge.compare --series KXNFLGAME                  # free, offlin
 ```
 
 One shell, because the exported key lives only where you ran `read`. At 2 credits a run, 500 credits is one capture a day for the month with 400 to spare. The free feed lists games only a few days ahead, so next week's Kalshi markets show as "unmatched" until the books post lines, usually midweek.
+
+**Any morning, for the non-sports list:**
+
+```bash
+cd ~/projects/kalshi-edge-finder
+source .venv-wsl/bin/activate
+python -m kalshi_edge.scan
+```
+
+No key, and it does not have to share a shell with the odds capture. A positive line is still a question: check the flag (`THIN` and `WIDE` mean the ask may not fill $10), check that the "why" names a forecast or a nowcast rather than a guess, and do not treat a weather edge as anything but the assumed error model described in the README.
 
 ## Reading the output
 
@@ -345,6 +377,10 @@ read -rs ODDS_API_KEY && export ODDS_API_KEY
 python -m kalshi_edge.odds --sport americanfootball_nfl          # 2 credits
 python -m kalshi_edge.collect --series KXNFLGAME --mode snapshot
 python -m kalshi_edge.compare --series KXNFLGAME
+
+# ---- any morning, no key ----
+python -m kalshi_edge.scan
+python -m kalshi_edge.scan --horizon-days 14 --skip-short
 
 # ---- variations, no network ----
 python -m kalshi_edge.compare --series KXNFLGAME --reference median --devig multiplicative
