@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta, timezone
 
-from kalshi_edge.nws import daily_high, parse_hourly, station_location
+from kalshi_edge.nws import daily_high, forecast_covers_daily_high, parse_hourly, station_location
 
 
 def _hour(local: str, temperature: int) -> dict:
@@ -59,6 +59,24 @@ def test_station_location_reads_geojson():
     }
     assert station_location(payload) == (40.78333, -73.96667, "New York City, Central Park")
     assert station_location({}) is None
+
+
+def test_falling_afternoon_fragment_is_not_the_daily_high():
+    # 3pm local, and the grid only has 3pm onward. Noon may already have been
+    # the high; the 65F still in the grid is not the calendar-day maximum.
+    payload = {
+        "properties": {
+            "periods": [
+                _hour("2026-11-11T15:00:00-05:00", 65),
+                _hour("2026-11-11T16:00:00-05:00", 63),
+                _hour("2026-11-11T17:00:00-05:00", 60),
+            ]
+        }
+    }
+    hours = parse_hourly(payload)
+    now = datetime(2026, 11, 11, 20, 0, tzinfo=UTC)  # 15:00 in the -05:00 zone
+    assert forecast_covers_daily_high(hours, hours[0].start.date(), now) is False
+    assert daily_high(hours, market_day=hours[0].start.date(), now=now) is None
 
 
 def test_afternoon_already_past_is_not_a_forecast():

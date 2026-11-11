@@ -139,6 +139,39 @@ def hourly_forecast_url(points_payload: object) -> str | None:
     return url
 
 
+def forecast_covers_daily_high(hours: list[HourlyTemp], market_day: date, now: datetime) -> bool:
+    """Whether the hourly grid still contains the hours that can hold the day's high.
+
+    The NWS hourly forecast only carries hours that have not ended. The
+    calendar-day maximum is the max of the whole local date, and on these
+    contracts that maximum is formed between local noon and 5pm. If any of
+    those hours is already behind ``now`` and missing from the grid, the max
+    of what remains is the temperature after the peak, not the peak. A 3pm
+    grid that starts at 65°F and falls cannot be the daily high when the
+    station may already have reached 80°F at noon.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    on_day = [hour for hour in hours if hour.start.date() == market_day]
+    if not on_day:
+        return False
+    present = {hour.start.hour for hour in on_day}
+    local_now = now.astimezone(on_day[0].start.tzinfo)
+    if local_now.date() > market_day:
+        return False
+    if local_now.date() < market_day:
+        # A future date is covered when the grid still reaches back to noon,
+        # not when it is only the late fragment of that date.
+        return min(present) <= 12
+    # Today. Before noon the high is still ahead, as long as noon itself is
+    # still in the grid. From noon on, every afternoon hour up through the
+    # current hour has to still be present.
+    if local_now.hour < 12:
+        return min(present) <= 12 and any(hour >= 12 for hour in present)
+    last_elapsed = min(17, local_now.hour)
+    return all(hour in present for hour in range(12, last_elapsed + 1))
+
+
 def daily_high(
     hours: list[HourlyTemp],
     market_day: date,
@@ -146,19 +179,21 @@ def daily_high(
     *,
     station_name: str = "",
 ) -> DailyHigh | None:
-    """Max forecast temperature on ``market_day``, if the afternoon is still ahead.
+    """Max forecast temperature on ``market_day``, if that max is still in the grid.
 
-    The high has to be among hours whose local date is the market date, and
-    at least one of those hours has to fall in the afternoon (local 12-17)
-    and still be in the future (or within the last hour). A forecast that
-    only has the evening left is the temperature after the high, and using
-    it as the high would be the wrong number. When several hours share the
-    max, the earliest one sets the lead time.
+    The high has to be among hours whose local date is the market date, the
+    grid has to still cover the afternoon hours that have already elapsed
+    (see ``forecast_covers_daily_high``), and at least one of those hours
+    has to fall in the afternoon (local 12-17) and still be in the future
+    (or within the last hour). A forecast that only has the evening left, or
+    only the falling tail of the afternoon, is the temperature after the
+    high. When several hours share the max, the earliest one sets the lead
+    time.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     on_day = [hour for hour in hours if hour.start.date() == market_day]
-    if not on_day:
+    if not on_day or not forecast_covers_daily_high(on_day, market_day, now):
         return None
     upcoming = now - timedelta(hours=1)
     afternoon = [
@@ -203,6 +238,13 @@ class NwsForecasts:
             return None, f"NWS request for {station_id} failed ({exc})"
         found = daily_high(hours, market_day, now, station_name=name)
         if found is None:
+            on_day = [hour for hour in hours if hour.start.date() == market_day]
+            if on_day and not forecast_covers_daily_high(on_day, market_day, now):
+                return None, (
+                    f"NWS hourly forecast for {station_id} on {market_day.isoformat()} "
+                    "no longer covers the elapsed afternoon (the calendar-day high may "
+                    "already be outside the forecast)"
+                )
             return None, (
                 f"NWS hourly forecast for {station_id} has no remaining afternoon "
                 f"hour on {market_day.isoformat()} (the high is already outside the forecast)"

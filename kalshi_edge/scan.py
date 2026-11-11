@@ -582,7 +582,7 @@ def _scan_weather(
                 continue
             high, reason = forecasts.daily_high(station, day, now)
             if high is None:
-                if "no remaining afternoon" in reason:
+                if "outside the forecast" in reason:
                     stale_highs.append(event_ticker)
                 else:
                     notes.append(f"{event_ticker}: {reason}")
@@ -635,8 +635,8 @@ def _scan_weather(
                 )
     if stale_highs:
         notes.append(
-            f"{len(stale_highs)} events had no remaining afternoon hour in the NWS forecast "
-            f"(the high is already outside it), including {stale_highs[0]}"
+            f"{len(stale_highs)} events were not priced because the NWS hourly grid no longer "
+            f"contains the calendar-day high, including {stale_highs[0]}"
         )
     return rows
 
@@ -793,13 +793,13 @@ def _scan_short(
         if ticker not in skip and ticker in catalog and series_in_short_list(catalog[ticker], categories)
     ]
     logger.info("short-dated series with an open event: %d", len(candidates))
-    horizon_end = int((now + horizon).timestamp())
     found: list[ScanRow] = []
     for ticker in candidates:
         try:
-            markets, warning = _collect_markets(
-                client, ticker, max_pages=5, max_close_ts=horizon_end
-            )
+            # No max_close_ts. That parameter filters close_time, and a market
+            # can be expected to settle inside the horizon while its close is
+            # later. tradable_within applies the expected-settlement cutoff.
+            markets, warning = _collect_markets(client, ticker, max_pages=20)
         except KalshiAPIError as exc:
             notes.append(f"{ticker}: {exc}")
             continue

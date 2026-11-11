@@ -165,6 +165,20 @@ def _world(*, yes_ask, no_ask, high):
         yes_ask="0.4000",
         no_ask="0.7000",
     )
+    # Expected to settle inside the horizon, while the scheduled close is months out.
+    # A close-time filter would drop it. The short list must not.
+    early_settlement = _market(
+        "KXAIWEEK-26NOV16-LATECLOSE",
+        "KXAIWEEK-26NOV16",
+        strike_type="custom",
+        subtitle="late close",
+        title="Settles this week, closes next year",
+        rules="Resolves on the company's blog.",
+        close="2027-06-01T18:00:00Z",
+        expected="2026-11-16T18:00:00Z",
+        volume="40.00",
+        oi="20.00",
+    )
     later = _market(
         "KXFINAI-27JUN-T1",
         "KXFINAI-27JUN",
@@ -191,7 +205,7 @@ def _world(*, yes_ask, no_ask, high):
         "KXHIGHNY": [weather],
         "KXCPI": [cpi],
         "KXPAYROLLS": [payrolls],
-        "KXAIWEEK": [soon],
+        "KXAIWEEK": [soon, early_settlement],
         "KXFINAI": [later, soon],  # soon is not this series; the far one is filtered by close time
         "KXSPORT": [_market("KXSPORT-26NOV12-T1", "KXSPORT-26NOV12", title="Sports should not appear")],
         "KXPOLAI": [_market("KXPOLAI-26NOV12-T1", "KXPOLAI-26NOV12", title="Politics should not appear")],
@@ -276,7 +290,12 @@ def test_nothing_clears_when_the_ask_is_richer_than_the_model(tmp_path):
     assert "KXFINAI" in fetched
     assert "KXAIWEEK" in fetched
     tickers = [row.ticker for row in report.short_dated]
-    assert tickers == ["KXAIWEEK-26NOV15-T1", "KXFINAI-26NOV20-T1"]
+    assert tickers == [
+        "KXAIWEEK-26NOV15-T1",
+        "KXAIWEEK-26NOV16-LATECLOSE",
+        "KXFINAI-26NOV20-T1",
+    ]
+    assert all(call.get("max_close_ts") is None for call in client.calls)
     assert report.short_dated[0].clears is False
     assert "THIN" in report.short_dated[0].flags
     assert "NOBID" in report.short_dated[0].flags
