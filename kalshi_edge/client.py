@@ -21,7 +21,7 @@ import random
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -65,6 +65,8 @@ class KalshiClient:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         rng: Callable[[], float] = random.random,
+        user_agent: str = USER_AGENT,
+        accept: str = "application/json",
     ) -> None:
         if min_interval < 0:
             raise ValueError("min_interval must be >= 0")
@@ -84,8 +86,8 @@ class KalshiClient:
         self.session = session if session is not None else requests.Session()
         # Overwrite rather than setdefault: requests installs its own
         # User-Agent, and a reused session must not keep an Authorization key.
-        self.session.headers["Accept"] = "application/json"
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.session.headers["Accept"] = accept
+        self.session.headers["User-Agent"] = user_agent
         self.session.headers.pop("Authorization", None)
 
     def close(self) -> None:
@@ -94,7 +96,35 @@ class KalshiClient:
 
     def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict:
         """GET ``path`` and return a JSON object, retrying transient failures."""
-        url = self.base_url + path
+        payload = self._read_json(path, params)
+        if not isinstance(payload, dict):
+            raise KalshiAPIError(f"{path} returned {type(payload).__name__}, expected object")
+        return payload
+
+    def get_json_list(self, path: str, params: dict[str, Any] | None = None) -> list:
+        """GET ``path`` and return a JSON array. Same pacing and retries as ``get_json``."""
+        payload = self._read_json(path, params)
+        if not isinstance(payload, list):
+            raise KalshiAPIError(f"{path} returned {type(payload).__name__}, expected list")
+        return payload
+
+    def _url(self, path: str) -> str:
+        """Resolve ``path`` against this client's host.
+
+        An absolute URL is accepted only when its host is the client's host,
+        so a forecast link returned by that host can be followed and a link
+        to somewhere else cannot.
+        """
+        if path.startswith(("http://", "https://")):
+            base_host = urlparse(self.base_url).netloc
+            other = urlparse(path).netloc
+            if other != base_host:
+                raise KalshiAPIError(f"refusing URL on {other}; this client talks to {base_host}")
+            return path
+        return self.base_url + path
+
+    def _read_json(self, path: str, params: dict[str, Any] | None) -> Any:
+        url = self._url(path)
         query = {key: value for key, value in (params or {}).items() if value is not None}
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
@@ -124,12 +154,9 @@ class KalshiClient:
                     status_code=status,
                 )
             try:
-                payload = response.json()
+                return response.json()
             except ValueError as exc:
                 raise KalshiAPIError(f"{path} did not return JSON") from exc
-            if not isinstance(payload, dict):
-                raise KalshiAPIError(f"{path} returned {type(payload).__name__}, expected object")
-            return payload
         raise KalshiAPIError(
             f"giving up on {path} after {self.max_attempts} attempts: {last_error}"
         )
@@ -142,6 +169,9 @@ class KalshiClient:
         historical: bool = False,
         limit: int = 200,
         max_pages: int = 500,
+        event_ticker: str | None = None,
+        min_close_ts: int | None = None,
+        max_close_ts: int | None = None,
     ) -> Iterator[list[dict]]:
         """Yield each page of markets for one series.
 
@@ -156,6 +186,10 @@ class KalshiClient:
         ``active``. ``status=settled`` matches ``finalized``. Historical
         markets are already settled, and that endpoint's filters do not take
         ``status``.
+
+        ``min_close_ts`` and ``max_close_ts`` are Unix seconds. They are a
+        server-side filter on ``close_time`` and are only sent to the live
+        list. ``event_ticker`` narrows the page to one event.
 
         Stops when the cursor is empty or repeats. Repeating means the server
         handed us a page we already consumed; continuing would loop. Raises
@@ -175,6 +209,13 @@ class KalshiClient:
             # parameter; these rows are already off the live book.
             if status and not historical:
                 params["status"] = status
+            if event_ticker and not historical:
+                params["event_ticker"] = event_ticker
+            if not historical:
+                if min_close_ts is not None:
+                    params["min_close_ts"] = int(min_close_ts)
+                if max_close_ts is not None:
+                    params["max_close_ts"] = int(max_close_ts)
             if cursor:
                 params["cursor"] = cursor
             payload = self.get_json(path, params)
@@ -190,11 +231,7 @@ class KalshiClient:
                 status,
             )
             yield markets
-            raw_cursor = payload.get("cursor") or ""
-            if isinstance(raw_cursor, str):
-                next_cursor = raw_cursor.strip()
-            else:
-                next_cursor = str(raw_cursor).strip()
+            next_cursor = _cursor(payload)
             if not next_cursor or next_cursor in seen_cursors:
                 return
             seen_cursors.add(next_cursor)
@@ -202,6 +239,76 @@ class KalshiClient:
         raise KalshiAPIError(
             f"{path} for {series_ticker} did not end after {max_pages} pages"
         )
+
+    def list_series(self) -> list[dict]:
+        """Every series from ``GET /series``, following ``cursor`` if present.
+
+        The unpaginated response is one object whose ``series`` value is the
+        whole catalog (category, tags, frequency, and the fee schedule). A
+        cursor, if the exchange starts sending one, is followed the same way
+        as a market list. A repeated cursor stops the loop.
+        """
+        collected: list[dict] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        for page_number in range(1, 51):
+            params: dict[str, Any] = {}
+            if cursor:
+                params["cursor"] = cursor
+            payload = self.get_json("/series", params or None)
+            batch = payload.get("series") or []
+            if not isinstance(batch, list):
+                raise KalshiAPIError("/series 'series' was not a list")
+            collected.extend(item for item in batch if isinstance(item, dict))
+            logger.info("series page %d: %d series", page_number, len(batch))
+            next_cursor = _cursor(payload)
+            if not next_cursor or next_cursor in seen:
+                return collected
+            seen.add(next_cursor)
+            cursor = next_cursor
+        raise KalshiAPIError("/series did not end after 50 pages")
+
+    def iter_event_pages(
+        self,
+        *,
+        status: str | None = "open",
+        limit: int = 200,
+        max_pages: int = 500,
+    ) -> Iterator[list[dict]]:
+        """Yield pages of events.
+
+        Nested markets are not requested. An event carries ``category`` and
+        ``series_ticker`` but not a close time; callers that need quotes
+        fetch the series' markets separately. The cursor rules match
+        ``iter_market_pages``.
+        """
+        if max_pages < 1:
+            raise ValueError("max_pages must be >= 1")
+        if not 1 <= limit <= 200:
+            # 200 is the page size this scan was written against. The markets
+            # list accepts 1000; this endpoint is kept at the size that was
+            # actually used, so a larger guess cannot 400 the run.
+            raise ValueError("limit must be between 1 and 200")
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for page_number in range(1, max_pages + 1):
+            params: dict[str, Any] = {"limit": limit, "with_nested_markets": "false"}
+            if status:
+                params["status"] = status
+            if cursor:
+                params["cursor"] = cursor
+            payload = self.get_json("/events", params)
+            events = payload.get("events") or []
+            if not isinstance(events, list):
+                raise KalshiAPIError("/events 'events' was not a list")
+            logger.info("events page %d: %d events (status=%s)", page_number, len(events), status)
+            yield events
+            next_cursor = _cursor(payload)
+            if not next_cursor or next_cursor in seen_cursors:
+                return
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        raise KalshiAPIError(f"/events did not end after {max_pages} pages")
 
     def get_candlesticks(
         self,
@@ -272,6 +379,13 @@ class KalshiClient:
         if wait > 0:
             self._sleep(wait)
         self._last_request_at = self._clock()
+
+
+def _cursor(payload: dict) -> str:
+    raw = payload.get("cursor") or ""
+    if isinstance(raw, str):
+        return raw.strip()
+    return str(raw).strip()
 
 
 def _retry_after(headers: Any) -> float | None:

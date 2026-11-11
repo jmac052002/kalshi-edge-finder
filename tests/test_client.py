@@ -178,3 +178,71 @@ def test_session_sends_no_credentials():
         assert client.session.headers["Accept"] == "application/json"
     finally:
         client.close()
+
+
+def test_custom_user_agent_still_sends_no_credentials():
+    client = KalshiClient(
+        session=FakeSession(lambda url, params, timeout: FakeResponse(200, {})),
+        min_interval=0,
+        sleep=lambda _seconds: None,
+        user_agent="custom-agent",
+        accept="application/geo+json",
+    )
+    assert client.session.headers["User-Agent"] == "custom-agent"
+    assert client.session.headers["Accept"] == "application/geo+json"
+    assert "Authorization" not in client.session.headers
+
+
+def test_get_json_list_and_refuses_another_host():
+    client = _client(lambda url, params, timeout: FakeResponse(200, [{"a": 1}]))
+    assert client.get_json_list("/nowcast.json") == [{"a": 1}]
+    try:
+        client.get_json("https://evil.example/secret")
+    except KalshiAPIError as exc:
+        assert "evil.example" in str(exc)
+    else:
+        raise AssertionError("expected KalshiAPIError")
+    assert all("evil.example" not in call["url"] for call in client.session.calls)
+
+
+def test_list_series_follows_cursor():
+    def handler(url, params, timeout):
+        assert url.endswith("/series")
+        if not (params or {}).get("cursor"):
+            return FakeResponse(200, {"series": [{"ticker": "KXHIGHNY"}], "cursor": "more"})
+        return FakeResponse(200, {"series": [{"ticker": "KXCPI"}], "cursor": ""})
+
+    client = _client(handler)
+    assert [row["ticker"] for row in client.list_series()] == ["KXHIGHNY", "KXCPI"]
+
+
+def test_market_page_sends_close_window():
+    def handler(url, params, timeout):
+        return FakeResponse(200, {"markets": [], "cursor": ""})
+
+    client = _client(handler)
+    list(
+        client.iter_market_pages(
+            series_ticker="KXHIGHNY",
+            status="open",
+            min_close_ts=100,
+            max_close_ts=200,
+        )
+    )
+    params = client.session.calls[0]["params"]
+    assert params["min_close_ts"] == 100
+    assert params["max_close_ts"] == 200
+    assert params["series_ticker"] == "KXHIGHNY"
+    assert params["status"] == "open"
+
+
+def test_event_pages_do_not_nest_markets():
+    def handler(url, params, timeout):
+        assert url.endswith("/events")
+        return FakeResponse(200, {"events": [{"series_ticker": "KXAI"}], "cursor": ""})
+
+    client = _client(handler)
+    pages = list(client.iter_event_pages(status="open", limit=50))
+    assert pages == [[{"series_ticker": "KXAI"}]]
+    assert client.session.calls[0]["params"]["with_nested_markets"] == "false"
+    assert client.session.calls[0]["params"]["status"] == "open"
