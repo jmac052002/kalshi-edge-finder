@@ -223,7 +223,8 @@ def constant_calibration(
     gate) or one that fails it.
     """
     ours, market = (0.10, 0.20) if beats_market else (0.20, 0.10)
-    scores = {name: {"calibrated": ours, "market": market} for name in GATED_SCORES}
+    scores: dict = {name: {"calibrated": ours, "market": market} for name in GATED_SCORES}
+    scores["out_of_sample"] = True
     sd = _predictive_sd(scale_f, df)
     lead = LeadFit(
         lead_hours=REFERENCE_LEAD_HOURS,
@@ -585,9 +586,16 @@ def market_gate(calibration: WeatherCalibration) -> tuple[bool, str]:
     """``(may_rank, reason)``: has this fit scored at least as well as the market?
 
     Lower is better for both scores, and the fit has to match or beat the
-    noon price on each one. The reason is empty when the gate is open and is
-    a sentence for the report when it is shut. An unfitted calibration is
-    shut for its own reason, which ``predict_high`` already reports.
+    noon price on each one, on days it was not fit to. ``weather_calibrate``
+    marks a score block ``out_of_sample`` only when it fit on earlier days
+    and scored on later ones. A ``--fit-only`` refit with no ``--split-date``
+    scores the fit on its own training days and marks the block in-sample.
+    A model always looks better on the data it was tuned to, so that block
+    cannot open the gate however good it reads.
+
+    The reason is empty when the gate is open and is a sentence for the
+    report when it is shut. An unfitted calibration is shut for its own
+    reason, which ``predict_high`` already reports.
     """
     if not calibration.trusted:
         return False, ""
@@ -599,11 +607,17 @@ def market_gate(calibration: WeatherCalibration) -> tuple[bool, str]:
             return False, "the weather fit has not been scored against market prices, so weather is not ranked"
         if ours > market:
             worse.append(f"{name.replace('_', ' ')} {ours:.3f} against the market's {market:.3f}")
+    held_out = scores.get("out_of_sample") is True
     if worse:
-        sample = "out of sample" if scores.get("out_of_sample") is True else "in sample"
+        sample = "out of sample" if held_out else "in sample"
         return False, (
             f"the weather fit scores worse than the market's own price ({sample}: {', '.join(worse)}), "
             "so weather is listed and not ranked"
+        )
+    if not held_out:
+        return False, (
+            "the weather fit was scored only on the days it was fit to, which proves nothing about new days, "
+            "so weather is not ranked; refit with a split date to score it out of sample"
         )
     return True, ""
 
