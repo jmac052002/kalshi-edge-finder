@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 from collections import defaultdict
 from collections.abc import Sequence
@@ -78,9 +79,14 @@ from kalshi_edge.weather import (
     temperature_yes_probability,
 )
 from kalshi_edge.weather_error import (
+    DEFAULT_DISAGREE_GAP,
+    DISAGREE_NOTE,
+    UNPROVEN_FLAG,
+    UNPROVEN_NOTE,
     WeatherCalibration,
     judge_weather_edge,
     load_calibration,
+    market_gate,
     predict_high,
 )
 
@@ -88,6 +94,13 @@ logger = logging.getLogger(__name__)
 
 CHICAGO = ZoneInfo("America/Chicago")
 DEFAULT_BUDGET = Decimal(10)
+# A CPI side whose model probability is this far above the ask is flagged
+# VERIFY and is not ranked, the same brake weather has. The weather guard's
+# size comes from scored history; there is no such history for CPI, so this
+# is the unscored default and a judgment, not a fit. The reason for it is the
+# same: these contracts trade, and a nowcast that says 61% where the book
+# says 22% is far more likely to be missing something than to be right.
+ECON_DISAGREE_GAP = DEFAULT_DISAGREE_GAP
 DEFAULT_HORIZON_DAYS = 30
 DEFAULT_SHORT_CATEGORIES = ("Science and Technology", "Companies", "AI")
 # AI-tagged series in these categories are not pulled into the short list.
@@ -167,6 +180,14 @@ CAVEATS = (
     "weather bias and sd come from weather_calibration.json; a missing fit is not ranked as an edge",
     "a weather gap at least as large as the disagree guard is flagged VERIFY and is not an edge",
     "weather also has to beat the fee break-even by the fit's extra margin",
+    (
+        "UNPROVEN: the weather fit has not scored as well as the market's own price on days it did not see, "
+        "so that side is listed and is not an edge"
+    ),
+    (
+        f"a CPI gap of {ECON_DISAGREE_GAP:.0%} or more over the ask is flagged VERIFY the same way; "
+        "that size is a judgment, not a fit"
+    ),
     "CPI uses the Cleveland Fed nowcast and that file's own errors; payrolls, claims, and the Fed are price only",
     "THIN: 24h volume under 50, open interest under 20, or ask size below the order; WIDE: spread over 5 cents",
     "NOBID: the bid is missing or zero. A thin quote can clear this bar and still be untradable at $10",
@@ -241,7 +262,7 @@ class Report:
 
     @property
     def verify(self) -> list[ScanRow]:
-        """Weather sides the model and the ask disagree on by too much to rank."""
+        """Modeled sides the model and the ask disagree on by too much to rank."""
         rows = [row for row in self.modeled if "VERIFY" in row.flags]
         rows.sort(key=lambda row: (-(row.edge if row.edge is not None else -2.0), row.ticker, row.side))
         return rows
@@ -542,7 +563,21 @@ def _active(markets: list[dict]) -> list[dict]:
 
 
 def _apply_weather_guard(row: ScanRow, calibration: WeatherCalibration, *, trusted: bool) -> ScanRow:
-    """Fee break-even stays. A huge gap, or an unfitted width, is not ranked."""
+    """Fee break-even stays. A huge gap, an unfitted width, or an unproven fit is not ranked.
+
+    The gate is checked last and only takes a ranking away. A side the fit
+    would have ranked keeps its numbers, gains ``UNPROVEN``, and says why.
+    """
+    row = _apply_fit_guard(row, calibration, trusted=trusted)
+    may_rank, _reason = market_gate(calibration)
+    if may_rank or not trusted:
+        return row
+    flags = row.flags if UNPROVEN_FLAG in row.flags else row.flags + (UNPROVEN_FLAG,)
+    why = row.why if UNPROVEN_NOTE in row.why else f"{row.why}; {UNPROVEN_NOTE}"
+    return replace(row, clears=False, flags=flags, why=why)
+
+
+def _apply_fit_guard(row: ScanRow, calibration: WeatherCalibration, *, trusted: bool) -> ScanRow:
     ask = float(row.ask) if row.ask is not None else None
     clears, verify, note = judge_weather_edge(
         probability=row.model,
@@ -561,6 +596,27 @@ def _apply_weather_guard(row: ScanRow, calibration: WeatherCalibration, *, trust
     if clears == row.clears and flags == row.flags and why == row.why:
         return row
     return replace(row, clears=clears, flags=flags, why=why)
+
+
+def _apply_econ_guard(row: ScanRow, *, disagree_gap: float = ECON_DISAGREE_GAP) -> ScanRow:
+    """Flag a CPI side VERIFY, and take it out of the ranking, when the gap is too large.
+
+    The gap is model probability minus the ask, the same measure the weather
+    guard uses. A side at or past ``disagree_gap`` is still listed, with the
+    flag and the reason, so the disagreement can be looked at. It just is
+    not called an edge.
+    """
+    if row.model is None or row.ask is None:
+        return row
+    try:
+        ask = float(row.ask)
+    except ValueError:
+        return row
+    if not math.isfinite(ask) or not math.isfinite(row.model) or row.model - ask < disagree_gap:
+        return row
+    flags = row.flags if "VERIFY" in row.flags else row.flags + ("VERIFY",)
+    why = row.why if DISAGREE_NOTE in row.why else f"{row.why} {DISAGREE_NOTE}"
+    return replace(row, clears=False, flags=flags, why=why)
 
 
 def _scan_weather(
@@ -815,7 +871,8 @@ def _scan_econ(
                 subtitle = market.get("yes_sub_title") or market.get("title") or ""
                 try:
                     rows.extend(
-                        _price_sides(
+                        _apply_econ_guard(row)
+                        for row in _price_sides(
                             market,
                             yes_probability=probability,
                             fee=fee,

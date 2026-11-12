@@ -16,7 +16,19 @@ A city with fewer than a handful of settled days uses the pooled error.
 A missing file, or a pooled sample too small to fit, falls back to
 ``assumed_sigma_f`` and is not ranked as an edge.
 
-Two brakes sit on top of the fee break-even, for weather only. The model
+A fit that exists is not a fit that has earned a ranking. ``market_gate``
+reads the fit's own bracket scores, which ``weather_calibrate`` computes on
+days the fit did not see, against the price Kalshi was quoting at local
+noon. When the fit scores worse than that price, on Brier or on log loss, a
+weather side is still priced and listed and is not ranked as an edge. A line
+where a worse forecaster disagrees with a better one is a disagreement, and
+on the one morning it was checked the ranked weather sides lost about half
+their stake. The gate reads the file, so it lifts by itself the first time a
+refit (for instance on the NWS highs the scan stores) scores at least as
+well as the market. A fit with no score is not ranked either: not having
+been tested is not a pass.
+
+Two more brakes sit on top of the fee break-even, for weather only. The model
 has to clear the break-even by ``extra_margin`` (a few points, so a one-point
 gap is not a trade). And a gap between the model and the ask larger than
 ``disagree_gap`` is flagged for a look instead of ranked. The second brake
@@ -49,6 +61,13 @@ MIN_SCALE_F = 0.8
 OUTLIER_ABS_F = 25.0
 DEFAULT_DISAGREE_GAP = 0.15
 DEFAULT_EXTRA_MARGIN = 0.03
+# The flag a weather side carries while the fit has not out-scored the market.
+UNPROVEN_FLAG = "UNPROVEN"
+# What each such side says. The full reason, with the scores, is one note on the report.
+UNPROVEN_NOTE = "unproven: the fit scores worse than the market, not ranked"
+GATED_SCORES = ("brier", "log_loss")
+# The words a guarded side carries. The scan uses the same words for CPI.
+DISAGREE_NOTE = "model disagrees strongly, verify"
 # A t model has to beat the normal by this much per observation, and its
 # degrees of freedom have to say the tails are actually heavy. A tiny
 # in-sample gain is not a reason to complicate the scan.
@@ -138,6 +157,7 @@ class WeatherCalibration:
             f"A model-minus-ask gap of {self.disagree_gap:.0%} or more is flagged "
             "verify and not ranked; weather also needs "
             f"{self.extra_margin:.0%} of extra margin over the fee break-even"
+            + (f". Not ranked today: {market_gate(self)[1]}" if not market_gate(self)[0] else "")
         )
 
 
@@ -194,8 +214,17 @@ def constant_calibration(
     disagree_gap: float = 1.0,
     trusted: bool = True,
     source_label: str = "test calibration",
+    beats_market: bool = True,
 ) -> WeatherCalibration:
-    """One bias and scale at every lead. Tests pin a probability with this."""
+    """One bias and scale at every lead. Tests pin a probability with this.
+
+    ``beats_market`` writes a score block that passes ``market_gate`` (the
+    default, so a test about fees or the guard is not also a test of the
+    gate) or one that fails it.
+    """
+    ours, market = (0.10, 0.20) if beats_market else (0.20, 0.10)
+    scores: dict = {name: {"calibrated": ours, "market": market} for name in GATED_SCORES}
+    scores["out_of_sample"] = True
     sd = _predictive_sd(scale_f, df)
     lead = LeadFit(
         lead_hours=REFERENCE_LEAD_HOURS,
@@ -227,7 +256,7 @@ def constant_calibration(
         extra_margin=extra_margin,
         leads={REFERENCE_LEAD_HOURS: lead, LONG_LEAD_HOURS: longer},
         stations={},
-        scores={},
+        scores=scores,
     )
 
 
@@ -543,6 +572,56 @@ def predict_high(
     )
 
 
+def _score(scores: dict, name: str, who: str) -> float | None:
+    block = scores.get(name)
+    if not isinstance(block, dict):
+        return None
+    value = block.get(who)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def market_gate(calibration: WeatherCalibration) -> tuple[bool, str]:
+    """``(may_rank, reason)``: has this fit scored at least as well as the market?
+
+    Lower is better for both scores, and the fit has to match or beat the
+    noon price on each one, on days it was not fit to. ``weather_calibrate``
+    marks a score block ``out_of_sample`` only when it fit on earlier days
+    and scored on later ones. A ``--fit-only`` refit with no ``--split-date``
+    scores the fit on its own training days and marks the block in-sample.
+    A model always looks better on the data it was tuned to, so that block
+    cannot open the gate however good it reads.
+
+    The reason is empty when the gate is open and is a sentence for the
+    report when it is shut. An unfitted calibration is shut for its own
+    reason, which ``predict_high`` already reports.
+    """
+    if not calibration.trusted:
+        return False, ""
+    scores = calibration.scores if isinstance(calibration.scores, dict) else {}
+    worse: list[str] = []
+    for name in GATED_SCORES:
+        ours, market = _score(scores, name, "calibrated"), _score(scores, name, "market")
+        if ours is None or market is None:
+            return False, "the weather fit has not been scored against market prices, so weather is not ranked"
+        if ours > market:
+            worse.append(f"{name.replace('_', ' ')} {ours:.3f} against the market's {market:.3f}")
+    held_out = scores.get("out_of_sample") is True
+    if worse:
+        sample = "out of sample" if held_out else "in sample"
+        return False, (
+            f"the weather fit scores worse than the market's own price ({sample}: {', '.join(worse)}), "
+            "so weather is listed and not ranked"
+        )
+    if not held_out:
+        return False, (
+            "the weather fit was scored only on the days it was fit to, which proves nothing about new days, "
+            "so weather is not ranked; refit with a split date to score it out of sample"
+        )
+    return True, ""
+
+
 def judge_weather_edge(
     *,
     probability: float | None,
@@ -565,7 +644,7 @@ def judge_weather_edge(
     if not math.isfinite(probability) or not math.isfinite(ask) or not math.isfinite(break_even):
         return False, False, ""
     if probability - ask >= disagree_gap:
-        return False, True, "model disagrees strongly, verify"
+        return False, True, DISAGREE_NOTE
     return probability > break_even + extra_margin, False, ""
 
 

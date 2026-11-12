@@ -14,6 +14,7 @@ from kalshi_edge.weather_error import (
     judge_weather_edge,
     load_calibration,
     log_loss,
+    market_gate,
     predict_high,
     unfitted_calibration,
 )
@@ -207,6 +208,88 @@ def test_guard_requires_margin_and_flags_a_huge_gap():
         disagree_gap=1.0,
     )
     assert clears is False and verify is True
+
+
+def _scored(brier, log_loss_pair, **extra):
+    from dataclasses import replace
+
+    scores = {
+        "brier": {"calibrated": brier[0], "market": brier[1]},
+        "log_loss": {"calibrated": log_loss_pair[0], "market": log_loss_pair[1]},
+        "out_of_sample": True,
+        **extra,
+    }
+    return replace(constant_calibration(bias_f=0.0, scale_f=2.0), scores=scores)
+
+
+def test_the_gate_opens_only_when_the_fit_scores_at_least_as_well_as_the_market():
+    assert market_gate(_scored((0.07, 0.08), (0.23, 0.24))) == (True, "")
+    assert market_gate(_scored((0.08, 0.08), (0.24, 0.24))) == (True, "")  # a tie is not worse
+    may_rank, reason = market_gate(_scored((0.132, 0.077), (0.424, 0.241), out_of_sample=True))
+    assert may_rank is False
+    assert "out of sample" in reason
+    assert "brier 0.132 against the market's 0.077" in reason and "log loss 0.424 against the market's 0.241" in reason
+    # Better on one score and worse on the other is still shut, and says which.
+    may_rank, reason = market_gate(_scored((0.07, 0.08), (0.30, 0.24), out_of_sample=False))
+    assert may_rank is False and "log loss" in reason and "brier" not in reason and "in sample" in reason
+
+
+def test_a_fit_that_only_beats_the_market_on_its_own_training_days_stays_shut():
+    """``weather_calibrate --fit-only`` with no split date scores the fit in sample.
+
+    Those numbers flatter the fit by construction. Good in-sample scores, a
+    missing marker, and a marker that is not literally True all stay shut.
+    """
+    for marker in ({"out_of_sample": False}, {"out_of_sample": None}, {"out_of_sample": "true"}, {"out_of_sample": 1}):
+        may_rank, reason = market_gate(_scored((0.01, 0.08), (0.05, 0.24), **marker))
+        assert may_rank is False and "only on the days it was fit to" in reason
+    from dataclasses import replace
+
+    unmarked = _scored((0.01, 0.08), (0.05, 0.24))
+    unmarked = replace(unmarked, scores={k: v for k, v in unmarked.scores.items() if k != "out_of_sample"})
+    assert market_gate(unmarked)[0] is False
+    assert market_gate(_scored((0.01, 0.08), (0.05, 0.24)))[0] is True  # the same scores, held out
+
+
+def test_an_unscored_fit_is_not_ranked_either():
+    """Not having been tested against the market is not a pass."""
+    from dataclasses import replace
+
+    base = constant_calibration(bias_f=0.0, scale_f=2.0)
+    for scores in (
+        {},
+        {"brier": {"calibrated": 0.05}},
+        {"brier": {"calibrated": 0.05, "market": 0.08}},  # log loss missing
+        {"brier": {"calibrated": "0.05", "market": 0.08}, "log_loss": {"calibrated": 0.2, "market": 0.3}},
+        {"brier": {"calibrated": float("nan"), "market": 0.08}, "log_loss": {"calibrated": 0.2, "market": 0.3}},
+        {"brier": {"calibrated": True, "market": 0.08}, "log_loss": {"calibrated": 0.2, "market": 0.3}},
+        {"brier": "n/a", "log_loss": None},
+    ):
+        may_rank, reason = market_gate(replace(base, scores=scores))
+        assert may_rank is False and "has not been scored" in reason
+    # An unfitted calibration is shut too, and predict_high already says why.
+    assert market_gate(unfitted_calibration()) == (False, "")
+
+
+def test_the_test_helper_can_stand_on_either_side_of_the_gate():
+    assert market_gate(constant_calibration(bias_f=0.0, scale_f=2.0))[0] is True
+    shut = constant_calibration(bias_f=0.0, scale_f=2.0, beats_market=False)
+    assert market_gate(shut)[0] is False
+    assert "Not ranked today" in shut.scan_note() and "Not ranked today" not in constant_calibration(
+        bias_f=0.0, scale_f=2.0
+    ).scan_note()
+
+
+def test_the_packaged_file_is_gated_by_its_own_scores():
+    """Whatever the shipped numbers are, the gate has to agree with them."""
+    loaded = load_calibration()
+    brier, loss = loaded.scores["brier"], loaded.scores["log_loss"]
+    expected = (
+        loaded.scores.get("out_of_sample") is True
+        and brier["calibrated"] <= brier["market"]
+        and loss["calibrated"] <= loss["market"]
+    )
+    assert market_gate(loaded)[0] is expected
 
 
 def test_brier_and_log_loss_prefer_the_outcome():

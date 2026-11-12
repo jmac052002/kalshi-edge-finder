@@ -262,7 +262,7 @@ source .venv-wsl/bin/activate
 python -m kalshi_edge.scan
 ```
 
-No key, and it does not have to share a shell with the odds capture. A positive line is still a question: check the flag (`THIN` and `WIDE` mean the ask may not fill $10; `VERIFY` means the model and the ask disagree by more than the weather guard and the side was not ranked), check that the "why" names a forecast or a nowcast rather than a guess, and read a weather edge as the fitted error in the README, which is a GFS archive transferred onto the NWS high until enough stored NWS forecasts have settled.
+No key, and it does not have to share a shell with the odds capture. A positive line is still a question: check the flag (`THIN` and `WIDE` mean the ask may not fill $10; `VERIFY` means the model and the ask disagree by more than the guard and the side was not ranked; `UNPROVEN` means the weather fit has not scored as well as the market's own price, so no weather side is ranked until a refit does), check that the "why" names a forecast or a nowcast rather than a guess, and read a weather edge as the fitted error in the README, which is a GFS archive transferred onto the NWS high until enough stored NWS forecasts have settled.
 
 Refit that error with `python -m kalshi_edge.weather_calibrate` when you want the stored NWS sample in the fit. `--fit-only` uses the cache and does not call the network. The daily scan already records the forecast it used.
 

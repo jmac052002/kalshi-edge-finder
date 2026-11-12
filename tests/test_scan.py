@@ -1,12 +1,23 @@
 """The daily scan, against fake HTTP. Nothing here touches the network."""
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 from kalshi_edge.fees import series_fee
+from kalshi_edge.nowcast import MIN_FINISHED_MONTHS
 from kalshi_edge.nws import DailyHigh
 from kalshi_edge.odds_math import contracts_for_budget, evaluate
-from kalshi_edge.scan import event_year_month, format_chicago, format_report, report_to_json, run
+from kalshi_edge.scan import (
+    ECON_DISAGREE_GAP,
+    ScanRow,
+    _apply_econ_guard,
+    event_year_month,
+    format_chicago,
+    format_report,
+    report_to_json,
+    run,
+)
 from kalshi_edge.store import MarketStore
 from kalshi_edge.weather import assumed_sigma_f, temperature_yes_probability
 from kalshi_edge.weather_error import constant_calibration, unfitted_calibration
@@ -240,7 +251,7 @@ def _pinned_calibration():
     return constant_calibration(bias_f=0.0, scale_f=sigma, extra_margin=0.0, disagree_gap=1.0)
 
 
-def _run(tmp_path, *, yes_ask, no_ask, high, calibration=None):
+def _run(tmp_path, *, yes_ask, no_ask, high, calibration=None, month_charts=()):
     client, forecasts = _world(yes_ask=yes_ask, no_ask=no_ask, high=high)
     with MarketStore(tmp_path / "kalshi.db") as store:
         report = run(
@@ -250,7 +261,7 @@ def _run(tmp_path, *, yes_ask, no_ask, high, calibration=None):
             generated_at=GENERATED,
             forecasts=forecasts,
             calibration=_pinned_calibration() if calibration is None else calibration,
-            month_charts=[],
+            month_charts=list(month_charts),
             year_charts=[],
             budget=Decimal(10),
             horizon_days=30,
@@ -398,6 +409,146 @@ def test_extra_margin_blocks_a_tiny_weather_edge(tmp_path):
     assert yes.model > yes.break_even
     assert yes.clears is False
     assert "VERIFY" not in yes.flags
+
+
+def test_a_fit_that_has_not_beaten_the_market_lists_weather_and_ranks_none_of_it(tmp_path):
+    """Same world as the edge test above. The only difference is the fit's score against the market."""
+    sigma = assumed_sigma_f(3)
+    ranked, *_ = _run(tmp_path / "open", yes_ask="0.0500", no_ask="0.9900", high=_high())
+    gated, *_ = _run(
+        tmp_path / "shut",
+        yes_ask="0.0500",
+        no_ask="0.9900",
+        high=_high(),
+        calibration=constant_calibration(
+            bias_f=0.0, scale_f=sigma, extra_margin=0.0, disagree_gap=1.0, beats_market=False
+        ),
+    )
+    was = next(row for row in ranked.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    now = next(row for row in gated.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    assert was.clears is True and "UNPROVEN" not in was.flags
+    assert now.clears is False and "UNPROVEN" in now.flags and "VERIFY" not in now.flags
+    assert "unproven: the fit scores worse than the market, not ranked" in now.why
+    # Nothing about the price or the model changed. Only the ranking did.
+    assert (now.model, now.break_even, now.edge, now.ask, now.contracts) == (
+        was.model, was.break_even, was.edge, was.ask, was.contracts
+    )  # fmt: skip
+    assert gated.clears == [] and gated.nothing_clears
+    assert any("Not ranked today" in note and "scores worse than the market" in note for note in gated.notes)
+    assert "nothing clears costs today" in format_report(gated).splitlines()
+    assert any("UNPROVEN" in caveat for caveat in json.loads(report_to_json(gated))["caveats"])
+
+
+def test_a_gated_side_with_a_huge_gap_keeps_its_verify_flag_too(tmp_path):
+    sigma = assumed_sigma_f(3)
+    calibration = constant_calibration(
+        bias_f=0.0, scale_f=sigma, extra_margin=0.03, disagree_gap=0.15, beats_market=False
+    )
+    report, *_ = _run(tmp_path, yes_ask="0.0500", no_ask="0.9900", high=_high(), calibration=calibration)
+    yes = next(row for row in report.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    assert yes.clears is False and {"VERIFY", "UNPROVEN"} <= set(yes.flags)
+
+
+def test_the_gate_leaves_an_unfitted_model_and_cpi_alone(tmp_path):
+    report, *_ = _run(
+        tmp_path, yes_ask="0.0500", no_ask="0.9900", high=_high(), calibration=unfitted_calibration(),
+        month_charts=_month_charts(0.27),
+    )  # fmt: skip
+    weather = next(row for row in report.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    assert "UNPROVEN" not in weather.flags and "not ranked as an edge" in weather.why  # its own reason stands
+    assert not any("UNPROVEN" in row.flags for row in report.modeled if row.series_ticker == "KXCPI")
+
+
+def _nowcast_chart(month, now_values, actual):
+    """One month of the Cleveland Fed file: a nowcast path and, once the month is done, the print."""
+    labels = ["11/10" for _ in now_values] + ([f"CPI {month}"] if actual is not None else [])
+    now_data = [{"value": f"{value:.4f}"} for value in now_values]
+    actual_data = [{"value": ""} for _ in now_values]
+    if actual is not None:
+        now_data.append({"value": ""})
+        actual_data.append({"value": f"{actual:.4f}"})
+    return {
+        "chart": {"subcaption": month, "_comment": "2026-11-10 00:00"},
+        "categories": [{"category": [{"label": label} for label in labels]}],
+        "dataset": [
+            {"seriesname": "CPI Inflation", "data": now_data},
+            {"seriesname": "Core CPI Inflation", "data": now_data},
+            {"seriesname": "Actual CPI Inflation", "data": actual_data},
+            {"seriesname": "Actual Core CPI Inflation", "data": actual_data},
+        ],
+    }
+
+
+def _month_charts(nowcast):
+    """Enough finished months for a model, each nowcast 0.10 off, then the open month."""
+    finished = [
+        _nowcast_chart(f"{2024 + index // 12}-{index % 12 + 1:02d}", [0.30 + 0.10 * (-1) ** index, 0.30], 0.30)
+        for index in range(MIN_FINISHED_MONTHS)
+    ]
+    return [*finished, _nowcast_chart("2026-11", [nowcast], None)]
+
+
+def _econ_row(model, ask, *, flags=(), clears=True, why="nowcast", break_even=None, edge=None):
+    return ScanRow(
+        ticker="KXCPI-26NOV-T0.2",
+        title="CPI: Above 0.2%",
+        side="YES",
+        ask=ask,
+        model=model,
+        break_even=break_even,
+        edge=edge,
+        contracts=10,
+        settles_at="2026-12-10T14:56:00Z",
+        settles_chicago="2026-12-10 08:56 CST",
+        flags=flags,
+        why=why,
+        clears=clears,
+        series_ticker="KXCPI",
+        event_ticker="KXCPI-26NOV",
+    )
+
+
+def test_the_cpi_guard_flags_a_gap_at_or_past_the_threshold_and_leaves_the_rest_alone():
+    under = _econ_row(0.36, "0.2200")
+    assert _apply_econ_guard(under) is under  # 14 points: ranked as before
+    at = _apply_econ_guard(_econ_row(0.22 + ECON_DISAGREE_GAP, "0.2200"))
+    assert at.clears is False and at.flags == ("VERIFY",)
+    over = _apply_econ_guard(_econ_row(0.608, "0.2200", flags=("THIN",), break_even=0.232, edge=0.376))
+    assert over.clears is False and over.flags == ("THIN", "VERIFY")
+    assert over.why == "nowcast model disagrees strongly, verify"
+    assert (over.model, over.edge, over.break_even) == (0.608, 0.376, 0.232)  # the numbers are left as they were
+    assert _apply_econ_guard(over) == over  # applying it twice adds nothing
+    # A model far *below* the ask is not this guard's business: that side was never an edge.
+    cheap = _econ_row(0.10, "0.6000", clears=False)
+    assert _apply_econ_guard(cheap) is cheap
+    for odd in (_econ_row(None, "0.2200"), _econ_row(0.9, None), _econ_row(0.9, "n/a"), _econ_row(float("nan"), "0.2")):
+        assert _apply_econ_guard(odd) is odd
+
+
+def test_a_large_cpi_gap_is_listed_for_a_look_and_not_ranked(tmp_path):
+    """The nowcast says a 0.3 print is near certain; the book asks 55 cents for it."""
+    report, _client, _forecasts, _fee, _snapshots = _run(
+        tmp_path, yes_ask="0.9900", no_ask="0.9900", high=None, month_charts=_month_charts(0.60)
+    )
+    yes = next(row for row in report.modeled if row.series_ticker == "KXCPI" and row.side == "YES")
+    assert yes.model > 0.99 and yes.ask == "0.5500"
+    assert yes.clears is False and "VERIFY" in yes.flags
+    assert "model disagrees strongly, verify" in yes.why
+    assert yes in report.verify and yes not in report.clears
+    text = format_report(report)
+    assert "model disagrees strongly, verify (1), not ranked as edges:" in text
+    assert any("CPI gap" in caveat for caveat in json.loads(report_to_json(report))["caveats"])
+
+
+def test_a_modest_cpi_gap_still_clears(tmp_path):
+    """A nowcast of 0.27 with the file's 0.10 error: about 58% for a 0.3 print, against a 55 cent ask."""
+    report, _client, _forecasts, _fee, _snapshots = _run(
+        tmp_path, yes_ask="0.9900", no_ask="0.9900", high=None, month_charts=_month_charts(0.27)
+    )
+    yes = next(row for row in report.modeled if row.series_ticker == "KXCPI" and row.side == "YES")
+    assert 0 < yes.model - 0.55 < ECON_DISAGREE_GAP
+    assert "VERIFY" not in yes.flags
+    assert yes.clears is (yes.model > yes.break_even)
 
 
 def test_chicago_settlement_time():

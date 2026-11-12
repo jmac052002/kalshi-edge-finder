@@ -448,6 +448,31 @@ def test_large_edges_get_a_caution_and_ordinary_ones_do_not(paths):
     assert "clearing sides show an edge over" not in _build(paths)
 
 
+def test_the_caution_names_the_model_the_large_edges_came_from(paths):
+    report = _scan_report(edges=(0.40, 0.012, -0.1))
+    paths["scan"].write_text(scan.report_to_json(report), encoding="utf-8")
+    weather_only = _build(paths)
+    assert "not an NWS error" in weather_only and "The CPI ones are" not in weather_only
+    payload = json.loads(scan.report_to_json(report))
+    for row in payload["modeled"]:
+        row["series_ticker"] = "KXCPIYOY"
+    paths["scan"].write_text(json.dumps(payload), encoding="utf-8")
+    cpi_only = _build(paths)
+    assert "The CPI ones are the Cleveland Fed nowcast" in cpi_only and "not an NWS error" not in cpi_only
+
+
+def test_bars_are_scaled_to_the_sides_that_clear_not_to_a_verify_gap(paths):
+    """A 50-point VERIFY gap that does not clear must not shrink every ranked bar."""
+    payload = json.loads(scan.report_to_json(_scan_report(edges=(0.04, 0.02, 0.50))))
+    paths["scan"].write_text(json.dumps(payload), encoding="utf-8")
+    page = _build(paths)
+    table = page[page.index('id="scan-modeled"'):page.index("</table>", page.index('id="scan-modeled"'))]
+    bars = re.findall(r'<path class="pos" d="M48\.0 2H([0-9.]+)A', table)
+    # The +4.0 pp side is the largest that clears, so its bar is full: tip at 48 + 46, less the 3-unit corner.
+    assert bars[0] == "91.0"
+    assert bars[2] == "91.0"  # the 50-point side is clipped to a full bar, not drawn off the canvas
+
+
 # --- small pieces -----------------------------------------------------------
 
 

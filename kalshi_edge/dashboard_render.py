@@ -391,7 +391,11 @@ def render_modeled(rows: Sequence[Mapping[str, object]], tz: ZoneInfo) -> str:
     if not rows:
         return empty("The scan priced no contract against a model this run.")
     ordered = sorted(rows, key=_scan_order)
-    scale = bar_scale(row.get("edge") for row in ordered)
+    # Scale the bars to the sides that clear, which is the default view. A
+    # VERIFY side can carry a 50-point gap, and scaling to it would shrink
+    # every ranked bar to a sliver. Larger gaps just draw a full bar.
+    clearing = [row for row in ordered if row.get("clears") is True]
+    scale = bar_scale(row.get("edge") for row in (clearing or ordered))
     kinds = sorted({scan_kind(row.get("series_ticker")) for row in ordered})
     body: list[str] = []
     for row in ordered:
@@ -515,6 +519,28 @@ def median_clearing_edge(modeled: Sequence[Mapping[str, object]]) -> float | Non
     return statistics.median(known) if known else None
 
 
+def large_edge_sources(modeled: Sequence[Mapping[str, object]]) -> str:
+    """Which models the large clearing edges come from, and what each one rests on."""
+    kinds = {
+        scan_kind(row.get("series_ticker"))
+        for row in modeled
+        if row.get("clears") is True and (as_float(row.get("edge")) or 0.0) > LARGE_EDGE
+    }
+    parts = []
+    if "Weather" in kinds:
+        parts.append(
+            "The weather ones use a bias and width fit to settled CLI highs against an Open-Meteo GFS "
+            "previous-day forecast, a Student-t applied to the live NWS high. That is not an NWS error: api.weather.gov "
+            "has no forecast archive. "
+        )
+    if "CPI" in kinds:
+        parts.append(
+            "The CPI ones are the Cleveland Fed nowcast with that file's own historical error, read weeks "
+            "before the print. "
+        )
+    return "".join(parts)
+
+
 def large_edge_count(modeled: Sequence[Mapping[str, object]]) -> int:
     edges = (as_float(row.get("edge")) for row in modeled if row.get("clears") is True)
     return sum(1 for edge in edges if edge is not None and edge > LARGE_EDGE)
@@ -539,9 +565,7 @@ def render_scan(scan: Mapping[str, object] | None, data: DashboardData) -> str:
         caution = (
             f'<p class="banner warn">{large:,} of the {clears:,} clearing sides show an edge over '
             f"{LARGE_EDGE * 100:.0f} pp. A gap that large against a book people are trading usually means the model "
-            "is missing something the market knows, not that the market is wrong. Weather edges here use a bias "
-            "and width fit to settled CLI highs against an Open-Meteo GFS previous-day forecast, a Student-t "
-            "applied to the live NWS high. That is not an NWS error: api.weather.gov has no forecast archive. "
+            f"is missing something the market knows, not that the market is wrong. {esc(large_edge_sources(modeled))}"
             "Gaps at least as large as the scan's disagree guard are flagged VERIFY and do not clear. "
             "Read a large clearing edge as a disagreement to investigate, not as money on the table.</p>"
         )
