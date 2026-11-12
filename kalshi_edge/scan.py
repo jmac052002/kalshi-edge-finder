@@ -81,9 +81,12 @@ from kalshi_edge.weather import (
 from kalshi_edge.weather_error import (
     DEFAULT_DISAGREE_GAP,
     DISAGREE_NOTE,
+    UNPROVEN_FLAG,
+    UNPROVEN_NOTE,
     WeatherCalibration,
     judge_weather_edge,
     load_calibration,
+    market_gate,
     predict_high,
 )
 
@@ -177,6 +180,10 @@ CAVEATS = (
     "weather bias and sd come from weather_calibration.json; a missing fit is not ranked as an edge",
     "a weather gap at least as large as the disagree guard is flagged VERIFY and is not an edge",
     "weather also has to beat the fee break-even by the fit's extra margin",
+    (
+        "UNPROVEN: the weather fit has not scored as well as the market's own price on days it did not see, "
+        "so that side is listed and is not an edge"
+    ),
     (
         f"a CPI gap of {ECON_DISAGREE_GAP:.0%} or more over the ask is flagged VERIFY the same way; "
         "that size is a judgment, not a fit"
@@ -556,7 +563,21 @@ def _active(markets: list[dict]) -> list[dict]:
 
 
 def _apply_weather_guard(row: ScanRow, calibration: WeatherCalibration, *, trusted: bool) -> ScanRow:
-    """Fee break-even stays. A huge gap, or an unfitted width, is not ranked."""
+    """Fee break-even stays. A huge gap, an unfitted width, or an unproven fit is not ranked.
+
+    The gate is checked last and only takes a ranking away. A side the fit
+    would have ranked keeps its numbers, gains ``UNPROVEN``, and says why.
+    """
+    row = _apply_fit_guard(row, calibration, trusted=trusted)
+    may_rank, _reason = market_gate(calibration)
+    if may_rank or not trusted:
+        return row
+    flags = row.flags if UNPROVEN_FLAG in row.flags else row.flags + (UNPROVEN_FLAG,)
+    why = row.why if UNPROVEN_NOTE in row.why else f"{row.why}; {UNPROVEN_NOTE}"
+    return replace(row, clears=False, flags=flags, why=why)
+
+
+def _apply_fit_guard(row: ScanRow, calibration: WeatherCalibration, *, trusted: bool) -> ScanRow:
     ask = float(row.ask) if row.ask is not None else None
     clears, verify, note = judge_weather_edge(
         probability=row.model,

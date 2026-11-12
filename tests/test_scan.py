@@ -411,6 +411,54 @@ def test_extra_margin_blocks_a_tiny_weather_edge(tmp_path):
     assert "VERIFY" not in yes.flags
 
 
+def test_a_fit_that_has_not_beaten_the_market_lists_weather_and_ranks_none_of_it(tmp_path):
+    """Same world as the edge test above. The only difference is the fit's score against the market."""
+    sigma = assumed_sigma_f(3)
+    ranked, *_ = _run(tmp_path / "open", yes_ask="0.0500", no_ask="0.9900", high=_high())
+    gated, *_ = _run(
+        tmp_path / "shut",
+        yes_ask="0.0500",
+        no_ask="0.9900",
+        high=_high(),
+        calibration=constant_calibration(
+            bias_f=0.0, scale_f=sigma, extra_margin=0.0, disagree_gap=1.0, beats_market=False
+        ),
+    )
+    was = next(row for row in ranked.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    now = next(row for row in gated.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    assert was.clears is True and "UNPROVEN" not in was.flags
+    assert now.clears is False and "UNPROVEN" in now.flags and "VERIFY" not in now.flags
+    assert "unproven: the fit scores worse than the market, not ranked" in now.why
+    # Nothing about the price or the model changed. Only the ranking did.
+    assert (now.model, now.break_even, now.edge, now.ask, now.contracts) == (
+        was.model, was.break_even, was.edge, was.ask, was.contracts
+    )  # fmt: skip
+    assert gated.clears == [] and gated.nothing_clears
+    assert any("Not ranked today" in note and "scores worse than the market" in note for note in gated.notes)
+    assert "nothing clears costs today" in format_report(gated).splitlines()
+    assert any("UNPROVEN" in caveat for caveat in json.loads(report_to_json(gated))["caveats"])
+
+
+def test_a_gated_side_with_a_huge_gap_keeps_its_verify_flag_too(tmp_path):
+    sigma = assumed_sigma_f(3)
+    calibration = constant_calibration(
+        bias_f=0.0, scale_f=sigma, extra_margin=0.03, disagree_gap=0.15, beats_market=False
+    )
+    report, *_ = _run(tmp_path, yes_ask="0.0500", no_ask="0.9900", high=_high(), calibration=calibration)
+    yes = next(row for row in report.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    assert yes.clears is False and {"VERIFY", "UNPROVEN"} <= set(yes.flags)
+
+
+def test_the_gate_leaves_an_unfitted_model_and_cpi_alone(tmp_path):
+    report, *_ = _run(
+        tmp_path, yes_ask="0.0500", no_ask="0.9900", high=_high(), calibration=unfitted_calibration(),
+        month_charts=_month_charts(0.27),
+    )  # fmt: skip
+    weather = next(row for row in report.modeled if row.side == "YES" and row.series_ticker == "KXHIGHNY")
+    assert "UNPROVEN" not in weather.flags and "not ranked as an edge" in weather.why  # its own reason stands
+    assert not any("UNPROVEN" in row.flags for row in report.modeled if row.series_ticker == "KXCPI")
+
+
 def _nowcast_chart(month, now_values, actual):
     """One month of the Cleveland Fed file: a nowcast path and, once the month is done, the print."""
     labels = ["11/10" for _ in now_values] + ([f"CPI {month}"] if actual is not None else [])
