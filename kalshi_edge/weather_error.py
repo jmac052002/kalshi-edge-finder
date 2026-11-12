@@ -49,6 +49,8 @@ MIN_SCALE_F = 0.8
 OUTLIER_ABS_F = 25.0
 DEFAULT_DISAGREE_GAP = 0.15
 DEFAULT_EXTRA_MARGIN = 0.03
+# The words a guarded side carries. The scan uses the same words for CPI.
+DISAGREE_NOTE = "model disagrees strongly, verify"
 # A t model has to beat the normal by this much per observation, and its
 # degrees of freedom have to say the tails are actually heavy. A tiny
 # in-sample gain is not a reason to complicate the scan.
@@ -565,7 +567,7 @@ def judge_weather_edge(
     if not math.isfinite(probability) or not math.isfinite(ask) or not math.isfinite(break_even):
         return False, False, ""
     if probability - ask >= disagree_gap:
-        return False, True, "model disagrees strongly, verify"
+        return False, True, DISAGREE_NOTE
     return probability > break_even + extra_margin, False, ""
 
 
