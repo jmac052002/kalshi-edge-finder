@@ -12,6 +12,15 @@ high. That transfer is wrong if the NWS high does not share the GFS's bias.
 The scan stores each NWS high it uses so a later fit can replace the
 transfer with the forecast the scan actually reads.
 
+The morning scan prices same-day markets 3 to 10 hours before the high. A
+forecast that close is tighter than one made a day ahead, and giving it the
+24-hour width puts about a fifth of the probability on bins three or four
+degrees from the forecast. The archive's day-0 series (each hour from the
+newest run that covers it) is fit as lead 0, the floor of the error, and a
+lead under 24 hours is interpolated between that floor and the 24-hour fit.
+The interpolation is linear in variance. It is an interpolation between two
+fits, not a fit at that lead: the archive has nothing between them.
+
 A city with fewer than a handful of settled days uses the pooled error.
 A missing file, or a pooled sample too small to fit, falls back to
 ``assumed_sigma_f`` and is not ranked as an edge.
@@ -28,16 +37,17 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
 from kalshi_edge.weather import assumed_sigma_f, tidy_place
 
+SAME_DAY_LEAD_HOURS = 0
 REFERENCE_LEAD_HOURS = 24
 LONG_LEAD_HOURS = 48
-# Leads at or under this use the 24-hour fit. The archived series has no
-# lead shorter than 24 hours, and a same-day NWS high is inside that window.
+# Leads from 24 hours up to this use the 24-hour fit. Leads under 24 hours
+# are interpolated toward the day-0 fit when the file has one.
 SHORT_LEAD_CUTOFF_HOURS = 36.0
 # Past this, the 48-hour fit is widened with the old lead-time table so a
 # multi-day NWS grid is not given a two-day width.
@@ -49,6 +59,8 @@ MIN_SCALE_F = 0.8
 OUTLIER_ABS_F = 25.0
 DEFAULT_DISAGREE_GAP = 0.15
 DEFAULT_EXTRA_MARGIN = 0.03
+# The words a guarded side carries. The scan uses the same words for CPI.
+DISAGREE_NOTE = "model disagrees strongly, verify"
 # A t model has to beat the normal by this much per observation, and its
 # degrees of freedom have to say the tails are actually heavy. A tiny
 # in-sample gain is not a reason to complicate the scan.
@@ -119,6 +131,20 @@ class WeatherCalibration:
     stations: dict[str, CityFit]
     scores: dict
     rejected_outliers: int = 0
+    # Per-city day-0 fits. Separate from ``stations`` because a city's bias a
+    # day ahead says little about its bias on the day: across the 24 cities
+    # the two correlate at about 0.26. Empty in a file written before day 0
+    # was fit, and then same-day leads use the 24-hour fit as they used to.
+    same_day_stations: dict[str, CityFit] = field(default_factory=dict)
+
+    def _same_day_note(self) -> str:
+        same_day = self.leads.get(SAME_DAY_LEAD_HOURS)
+        if same_day is None:
+            return " No day-0 fit is loaded, so a same-day lead is given the 24h width, which is too wide."
+        return (
+            f" Leads under 24h are interpolated toward the day-0 fit "
+            f"(bias {same_day.bias_f:+.2f}F, sd {same_day.sd_f:.2f}F, n={same_day.n})."
+        )
 
     def scan_note(self) -> str:
         """One line for the scan report."""
@@ -134,7 +160,7 @@ class WeatherCalibration:
         return (
             f"weather error fit to {self.source_label}: "
             f"{lead.lead_hours}h pooled bias {lead.bias_f:+.2f}F, sd {lead.sd_f:.2f}F{tail}, "
-            f"n={lead.n} city-days. Applied bias is {self.bias_transfer:.0%} of that fit. "
+            f"n={lead.n} city-days.{self._same_day_note()} Applied bias is {self.bias_transfer:.0%} of that fit. "
             f"A model-minus-ask gap of {self.disagree_gap:.0%} or more is flagged "
             "verify and not ranked; weather also needs "
             f"{self.extra_margin:.0%} of extra margin over the fee break-even"
@@ -384,7 +410,7 @@ def fit_error_model(
     """
     kept = [pair for pair in pairs if abs(pair.error_f) <= OUTLIER_ABS_F]
     rejected = len(pairs) - len(kept)
-    by_lead: dict[int, list[ErrorPair]] = {REFERENCE_LEAD_HOURS: [], LONG_LEAD_HOURS: []}
+    by_lead: dict[int, list[ErrorPair]] = {SAME_DAY_LEAD_HOURS: [], REFERENCE_LEAD_HOURS: [], LONG_LEAD_HOURS: []}
     for pair in kept:
         if pair.lead_hours in by_lead:
             by_lead[pair.lead_hours].append(pair)
@@ -417,37 +443,19 @@ def fit_error_model(
     if fitted_24 is None:
         return unfitted_calibration()
     leads[REFERENCE_LEAD_HOURS] = fitted_24
-    longer_pairs = by_lead[LONG_LEAD_HOURS]
-    if len(longer_pairs) >= min_pooled_n:
-        longer = _lead_fit(longer_pairs, LONG_LEAD_HOURS, df, None)
-        if longer is not None:
-            leads[LONG_LEAD_HOURS] = longer
-    stations: dict[str, CityFit] = {}
-    grouped: dict[str, list[ErrorPair]] = {}
-    for pair in reference:
-        grouped.setdefault(pair.station_id, []).append(pair)
-    for station, city_pairs in grouped.items():
-        if len(city_pairs) < min_city_n:
-            continue
-        errors = [pair.error_f for pair in city_pairs]
-        raw_bias = _mean(errors)
-        raw_sd = _sample_sd(errors, raw_bias)
-        bias = _shrink(raw_bias, len(errors), fitted_24.bias_f, shrink_k)
-        variance = _shrink(raw_sd * raw_sd, len(errors), fitted_24.sd_f**2, shrink_k)
-        sd = max(MIN_SCALE_F, math.sqrt(max(variance, MIN_SCALE_F**2)))
-        scale = sd if df is None or df <= 2 else sd / math.sqrt(df / (df - 2.0))
-        scale = max(MIN_SCALE_F, scale)
-        places = [tidy_place(pair.place) for pair in city_pairs]
-        places = [place for place in places if place]
-        stations[station] = CityFit(
-            n=len(errors),
-            bias_f=bias,
-            scale_f=scale,
-            sd_f=_predictive_sd(scale, df),
-            raw_bias_f=raw_bias,
-            raw_sd_f=raw_sd,
-            place=max(places, key=len) if places else None,
-        )
+    for other in (SAME_DAY_LEAD_HOURS, LONG_LEAD_HOURS):
+        other_pairs = by_lead[other]
+        if len(other_pairs) >= min_pooled_n:
+            fitted = _lead_fit(other_pairs, other, df, None)
+            if fitted is not None:
+                leads[other] = fitted
+    stations = _city_fits(reference, fitted_24, df, min_city_n=min_city_n, shrink_k=shrink_k)
+    same_day_fit = leads.get(SAME_DAY_LEAD_HOURS)
+    same_day_stations = (
+        _city_fits(by_lead[SAME_DAY_LEAD_HOURS], same_day_fit, df, min_city_n=min_city_n, shrink_k=shrink_k)
+        if same_day_fit is not None
+        else {}
+    )
     return WeatherCalibration(
         fitted_at=fitted_at,
         trusted=True,
@@ -464,7 +472,46 @@ def fit_error_model(
         stations=stations,
         scores=scores or {},
         rejected_outliers=rejected,
+        same_day_stations=same_day_stations,
     )
+
+
+def _city_fits(
+    pairs: list[ErrorPair],
+    pooled: LeadFit,
+    df: float | None,
+    *,
+    min_city_n: int,
+    shrink_k: float,
+) -> dict[str, CityFit]:
+    """Each city's bias and scale at one lead, shrunk toward that lead's pool."""
+    stations: dict[str, CityFit] = {}
+    grouped: dict[str, list[ErrorPair]] = {}
+    for pair in pairs:
+        grouped.setdefault(pair.station_id, []).append(pair)
+    for station, city_pairs in grouped.items():
+        if len(city_pairs) < min_city_n:
+            continue
+        errors = [pair.error_f for pair in city_pairs]
+        raw_bias = _mean(errors)
+        raw_sd = _sample_sd(errors, raw_bias)
+        bias = _shrink(raw_bias, len(errors), pooled.bias_f, shrink_k)
+        variance = _shrink(raw_sd * raw_sd, len(errors), pooled.sd_f**2, shrink_k)
+        sd = max(MIN_SCALE_F, math.sqrt(max(variance, MIN_SCALE_F**2)))
+        scale = sd if df is None or df <= 2 else sd / math.sqrt(df / (df - 2.0))
+        scale = max(MIN_SCALE_F, scale)
+        places = [tidy_place(pair.place) for pair in city_pairs]
+        places = [place for place in places if place]
+        stations[station] = CityFit(
+            n=len(errors),
+            bias_f=bias,
+            scale_f=scale,
+            sd_f=_predictive_sd(scale, df),
+            raw_bias_f=raw_bias,
+            raw_sd_f=raw_sd,
+            place=max(places, key=len) if places else None,
+        )
+    return stations
 
 
 def _applied_bias(bias_f: float, transfer: float) -> float:
@@ -479,10 +526,16 @@ def predict_high(
 ) -> WeatherPredict:
     """Location, scale, and whether the scan may rank an edge from it.
 
-    The 24-hour fit covers leads up to 36 hours, which is the same-day NWS
-    high the daily scan usually sees. The archive has no shorter lead, so
-    those hours are not given a tighter width than the 24-hour error. Leads
-    past 72 hours keep the 48-hour fit and then widen with the old table.
+    Leads from 24 to 36 hours use the 24-hour fit. A lead under 24 hours is
+    interpolated between the day-0 fit and the 24-hour fit when the file has
+    a day-0 fit that is tighter than the 24-hour one; without it the 24-hour
+    fit is used as before. Leads past 72 hours keep the 48-hour fit and then
+    widen with the old table.
+
+    Both ends of the interpolation use the city's own fit at that lead when
+    it has one and the pooled fit when it does not. Past 36 hours a city has
+    no fit of its own, so its 24-hour bias is carried as a gap from the pool
+    and its scale as a ratio.
     """
     if not math.isfinite(lead_hours) or lead_hours < 0:
         raise ValueError(f"lead_hours must be >= 0, got {lead_hours!r}")
@@ -503,7 +556,26 @@ def predict_high(
     short = calibration.leads[REFERENCE_LEAD_HOURS]
     long = calibration.leads.get(LONG_LEAD_HOURS)
     city = calibration.stations.get(station_id or "")
-    if lead_hours <= SHORT_LEAD_CUTOFF_HOURS or long is None:
+    same_day = calibration.leads.get(SAME_DAY_LEAD_HOURS)
+    interpolated = False
+    near_city = calibration.same_day_stations.get(station_id or "")
+    near_bias = near_city.bias_f if near_city is not None else (same_day.bias_f if same_day is not None else 0.0)
+    near_scale = near_city.scale_f if near_city is not None else (same_day.scale_f if same_day is not None else 0.0)
+    far_bias = city.bias_f if city is not None else short.bias_f
+    far_scale = city.scale_f if city is not None else short.scale_f
+    if lead_hours < short.lead_hours and same_day is not None and near_scale < far_scale:
+        # weight is 0 at lead 0 and 1 at the 24-hour fit. Error variance, not
+        # the standard deviation, is what grows about linearly with lead.
+        # Day 0 is filed as lead 0 though its hours are a few hours old, so
+        # this errs a little wide, never narrower than the data supports.
+        weight = lead_hours / short.lead_hours
+        base = short
+        bias = near_bias + weight * (far_bias - near_bias)
+        scale = math.sqrt(near_scale**2 + weight * (far_scale**2 - near_scale**2))
+        widen = 1.0
+        used = short.lead_hours
+        interpolated = True
+    elif lead_hours <= SHORT_LEAD_CUTOFF_HOURS or long is None:
         base = short
         bias = city.bias_f if city is not None else short.bias_f
         scale = city.scale_f if city is not None else short.scale_f
@@ -529,6 +601,15 @@ def predict_high(
     detail = (
         f"fit n={n} ({who}) / {pooled_n} pooled at {used}h, {calibration.source_label}"
     )
+    if interpolated and same_day is not None:
+        near_n = near_city.n if near_city is not None else same_day.n
+        near_sd = _predictive_sd(near_scale, calibration.df)
+        far_sd = _predictive_sd(far_scale, calibration.df)
+        detail = (
+            f"interpolated to a {lead_hours:.0f}h lead between the day-0 fit (sd {near_sd:.1f}F, n={near_n}) "
+            f"and the 24h fit (sd {far_sd:.1f}F, n={n}) for {who}; not a fit at this lead; "
+            f"{calibration.source_label}"
+        )
     return WeatherPredict(
         mean_f=forecast_f + applied,
         scale_f=scale,
@@ -565,7 +646,7 @@ def judge_weather_edge(
     if not math.isfinite(probability) or not math.isfinite(ask) or not math.isfinite(break_even):
         return False, False, ""
     if probability - ask >= disagree_gap:
-        return False, True, "model disagrees strongly, verify"
+        return False, True, DISAGREE_NOTE
     return probability > break_even + extra_margin, False, ""
 
 
@@ -610,6 +691,43 @@ def normal_cdf_local(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
+def _stations_payload(stations: dict[str, CityFit]) -> dict[str, dict]:
+    return {
+        station: {
+            "n": city.n,
+            "bias_f": city.bias_f,
+            "scale_f": city.scale_f,
+            "sd_f": city.sd_f,
+            "raw_bias_f": city.raw_bias_f,
+            "raw_sd_f": city.raw_sd_f,
+            "place": city.place,
+        }
+        for station, city in sorted(stations.items())
+    }
+
+
+def _stations_from_payload(raw: object, name: str) -> dict[str, CityFit]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise TypeError(name)
+    stations: dict[str, CityFit] = {}
+    for station, row in raw.items():
+        if not isinstance(row, dict):
+            raise TypeError(name)
+        place = row.get("place")
+        stations[str(station)] = CityFit(
+            n=int(row["n"]),
+            bias_f=float(row["bias_f"]),
+            scale_f=float(row["scale_f"]),
+            sd_f=float(row["sd_f"]),
+            raw_bias_f=float(row["raw_bias_f"]),
+            raw_sd_f=float(row["raw_sd_f"]),
+            place=place if isinstance(place, str) else None,
+        )
+    return stations
+
+
 def calibration_to_json(calibration: WeatherCalibration) -> str:
     leads = {
         str(lead.lead_hours): {
@@ -621,18 +739,7 @@ def calibration_to_json(calibration: WeatherCalibration) -> str:
         }
         for lead in calibration.leads.values()
     }
-    stations = {
-        station: {
-            "n": city.n,
-            "bias_f": city.bias_f,
-            "scale_f": city.scale_f,
-            "sd_f": city.sd_f,
-            "raw_bias_f": city.raw_bias_f,
-            "raw_sd_f": city.raw_sd_f,
-            "place": city.place,
-        }
-        for station, city in sorted(calibration.stations.items())
-    }
+    stations = _stations_payload(calibration.stations)
     payload = {
         "version": 1,
         "fitted_at": calibration.fitted_at,
@@ -649,6 +756,7 @@ def calibration_to_json(calibration: WeatherCalibration) -> str:
         "rejected_outliers": calibration.rejected_outliers,
         "leads": leads,
         "stations": stations,
+        "same_day_stations": _stations_payload(calibration.same_day_stations),
         "scores": calibration.scores,
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -685,23 +793,8 @@ def _calibration_from_payload(payload: dict) -> WeatherCalibration:
             scale_f=float(row["scale_f"]),
             mae_f=float(row["mae_f"]),
         )
-    stations: dict[str, CityFit] = {}
-    raw_stations = payload.get("stations") or {}
-    if not isinstance(raw_stations, dict):
-        raise TypeError("stations")
-    for station, row in raw_stations.items():
-        if not isinstance(row, dict):
-            raise TypeError("station")
-        place = row.get("place")
-        stations[str(station)] = CityFit(
-            n=int(row["n"]),
-            bias_f=float(row["bias_f"]),
-            scale_f=float(row["scale_f"]),
-            sd_f=float(row["sd_f"]),
-            raw_bias_f=float(row["raw_bias_f"]),
-            raw_sd_f=float(row["raw_sd_f"]),
-            place=place if isinstance(place, str) else None,
-        )
+    stations = _stations_from_payload(payload.get("stations"), "stations")
+    same_day_stations = _stations_from_payload(payload.get("same_day_stations"), "same_day_stations")
     df = payload.get("df")
     scores = payload.get("scores") if isinstance(payload.get("scores"), dict) else {}
     trusted = bool(payload.get("trusted")) and REFERENCE_LEAD_HOURS in leads
@@ -721,6 +814,7 @@ def _calibration_from_payload(payload: dict) -> WeatherCalibration:
         stations=stations,
         scores=scores,
         rejected_outliers=int(payload.get("rejected_outliers") or 0),
+        same_day_stations=same_day_stations,
     )
 
 

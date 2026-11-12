@@ -48,3 +48,34 @@ def test_model_suffixed_names_are_read():
         }
     }
     assert daily_maxes(payload)[date(2026, 10, 25)][24] == 77.0
+
+
+def test_day_zero_is_read_as_lead_zero_beside_the_previous_day_series():
+    times = [f"2026-10-25T{hour:02d}:00" for hour in range(18)]
+    same_day = [50.0] * 18
+    same_day[15] = 71.0
+    day_ahead = [50.0] * 18
+    day_ahead[14] = 68.0
+    payload = {
+        "hourly": {
+            "time": times,
+            "temperature_2m": same_day,
+            "temperature_2m_previous_day1": day_ahead,
+        }
+    }
+    assert daily_maxes(payload)[date(2026, 10, 25)] == {0: 71.0, 24: 68.0}
+
+
+def test_a_previous_day_series_is_never_mistaken_for_day_zero():
+    """``temperature_2m_`` is a prefix of the previous-day names.
+
+    If only a previous-day column came back, filing it under lead 0 would fit
+    the same-day error from day-ahead forecasts and nothing would look wrong.
+    """
+    times = [f"2026-10-25T{hour:02d}:00" for hour in range(18)]
+    values = [50.0] * 18
+    values[15] = 77.0
+    payload = {"hourly": {"time": times, "temperature_2m_previous_day1_gfs_seamless": values}}
+    assert daily_maxes(payload)[date(2026, 10, 25)] == {24: 77.0}
+    payload["hourly"]["temperature_2m_gfs_seamless"] = [60.0] * 18
+    assert daily_maxes(payload)[date(2026, 10, 25)] == {0: 60.0, 24: 77.0}

@@ -9,9 +9,18 @@ here is the maximum of those hourly values on the station's local calendar
 date, but only when the local afternoon is actually in the series. That is
 the same reduction ``kalshi_edge.nws.daily_high`` applies to a live NWS grid.
 
-The model is GFS seamless, not the National Weather Service. Day-0 of this
-API is the archive's shortest lead (close to a nowcast) and is not read:
-it is not a forecast that was sitting on the screen the evening before.
+The model is GFS seamless, not the National Weather Service.
+
+``temperature_2m`` with no suffix is day 0: each hour taken from the newest
+run that covers it, so its lead is a few hours at most. It is not a forecast
+that was sitting on the screen the evening before, and it is never used as
+one. It is read as the *floor* of the error: what is left when the forecast
+has almost no lead, which is mostly the gap between a model grid cell and
+the airport thermometer the contract settles on. A morning scan prices
+same-day markets 3 to 10 hours before the high. That is between day 0 and
+the 24-hour series, so ``weather_error.predict_high`` interpolates between
+the two fits for those leads and no longer gives a three-hour forecast a
+one-day error.
 
 Docs: https://open-meteo.com/en/docs/previous-runs-api
 """
@@ -30,8 +39,11 @@ OPEN_METEO_USER_AGENT = (
     "kalshi-edge-finder/0.1 (daily temperature calibration; "
     "https://github.com/jmac052002/kalshi-edge-finder)"
 )
-# Fixed leads this client asks for. The key is the lead in hours.
+# Fixed leads this client asks for. The key is the lead in hours. Day 0 is
+# filed under lead 0: its true lead varies by hour and is small.
+SAME_DAY_LEAD_HOURS = 0
 LEAD_FIELDS = {
+    SAME_DAY_LEAD_HOURS: "temperature_2m",
     24: "temperature_2m_previous_day1",
     48: "temperature_2m_previous_day2",
 }
@@ -47,13 +59,22 @@ def make_open_meteo_client(**kwargs: object) -> KalshiClient:
 
 
 def _field(hourly: dict, name: str) -> list | None:
-    """The series, or the model-suffixed name Open-Meteo uses for a multi-model call."""
+    """The series, or the model-suffixed name Open-Meteo uses for a multi-model call.
+
+    ``temperature_2m_`` is also the start of ``temperature_2m_previous_day1``.
+    A suffixed match for the day-0 field must not pick up a previous-day
+    series, or a missing day-0 column would be filled with the 24-hour one
+    and fit as if it were same-day.
+    """
     if name in hourly and isinstance(hourly[name], list):
         return hourly[name]
     prefix = name + "_"
     for key, value in hourly.items():
-        if isinstance(key, str) and key.startswith(prefix) and isinstance(value, list):
-            return value
+        if not isinstance(key, str) or not key.startswith(prefix) or not isinstance(value, list):
+            continue
+        if "previous_day" in key and "previous_day" not in name:
+            continue
+        return value
     return None
 
 

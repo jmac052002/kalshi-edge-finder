@@ -154,6 +154,87 @@ def test_long_lead_is_wider_than_the_day_ahead_fit():
     assert far.scale_f > medium.scale_f
 
 
+def _two_lead_fit(*, near, far, station="KAAA"):
+    """A fit with a day-0 sample and a 24-hour sample for one station."""
+    return fit_error_model(
+        _pairs(station, near, lead=0) + _pairs(station, far, lead=24),
+        fitted_at="leads",
+        source_label="fixture",
+        source_note="fixture",
+        min_pooled_n=20,
+        min_city_n=8,
+        shrink_k=0.0,
+    )
+
+
+def test_a_same_day_lead_is_interpolated_between_day_zero_and_the_day_ahead_fit():
+    fit = _two_lead_fit(near=[1.0, 2.0] * 20, far=[-3.0, 0.0, 3.0, 0.0] * 10)
+    near, far = fit.same_day_stations["KAAA"], fit.stations["KAAA"]
+    assert fit.leads[0].n == 40 and near.scale_f < far.scale_f
+    at_zero = predict_high(fit, "KAAA", 0, 70)
+    at_six = predict_high(fit, "KAAA", 6, 70)
+    at_twelve = predict_high(fit, "KAAA", 12, 70)
+    at_day = predict_high(fit, "KAAA", 24, 70)
+    assert at_zero.scale_f == pytest_approx(near.scale_f)
+    assert at_day.scale_f == pytest_approx(far.scale_f)
+    assert at_zero.scale_f < at_six.scale_f < at_twelve.scale_f < at_day.scale_f
+    # Linear in variance, not in standard deviation: halfway in lead is halfway in variance.
+    assert at_twelve.scale_f**2 == pytest_approx((near.scale_f**2 + far.scale_f**2) / 2)
+    assert at_six.scale_f**2 == pytest_approx(near.scale_f**2 + 0.25 * (far.scale_f**2 - near.scale_f**2))
+    # The bias moves the same way: +1.5F on the day, 0F a day ahead.
+    assert at_zero.bias_f == pytest_approx(1.5) and at_day.bias_f == pytest_approx(0.0)
+    assert at_six.bias_f == pytest_approx(1.5 * 0.75)
+    assert "interpolated to a 6h lead" in at_six.detail and "not a fit at this lead" in at_six.detail
+    assert "interpolated" not in at_day.detail
+
+
+def test_without_a_day_zero_fit_a_same_day_lead_keeps_the_day_ahead_width():
+    """A file written before day 0 was fit must price exactly as it used to."""
+    fit = _two_lead_fit(near=[], far=[-3.0, 0.0, 3.0, 0.0] * 10)
+    assert 0 not in fit.leads and fit.same_day_stations == {}
+    assert predict_high(fit, "KAAA", 4, 70).scale_f == predict_high(fit, "KAAA", 24, 70).scale_f
+    assert "No day-0 fit is loaded" in fit.scan_note()
+
+
+def test_a_day_zero_fit_that_is_wider_than_the_day_ahead_fit_is_not_used():
+    """Error does not shrink with lead. If the data says so, something is off, and nothing is narrowed."""
+    fit = _two_lead_fit(near=[-4.0, 0.0, 4.0, 0.0] * 10, far=[-1.0, 0.0, 1.0, 0.0] * 10)
+    assert fit.leads[0].scale_f > fit.leads[24].scale_f
+    same_day, day_ahead = predict_high(fit, "KAAA", 4, 70), predict_high(fit, "KAAA", 24, 70)
+    assert same_day.scale_f == day_ahead.scale_f and "interpolated" not in same_day.detail
+
+
+def test_a_city_without_its_own_fit_interpolates_between_the_pooled_fits():
+    fit = _two_lead_fit(near=[1.0, 2.0] * 20, far=[-3.0, 0.0, 3.0, 0.0] * 10)
+    stranger = predict_high(fit, "KZZZ", 12, 70)
+    assert stranger.scale_f**2 == pytest_approx((fit.leads[0].scale_f**2 + fit.leads[24].scale_f**2) / 2)
+    assert "pooled" in stranger.detail
+
+
+def test_the_day_zero_fits_survive_the_json_round_trip_and_old_files_still_load():
+    fit = _two_lead_fit(near=[1.0, 2.0] * 20, far=[-3.0, 0.0, 3.0, 0.0] * 10)
+    text = calibration_to_json(fit)
+    again = calibration_from_json(text)
+    assert again.leads[0] == fit.leads[0] and again.same_day_stations == fit.same_day_stations
+    assert predict_high(again, "KAAA", 6, 70) == predict_high(fit, "KAAA", 6, 70)
+    import json
+
+    payload = json.loads(text)
+    del payload["same_day_stations"]
+    del payload["leads"]["0"]
+    older = calibration_from_json(json.dumps(payload))
+    assert older.trusted and older.same_day_stations == {} and 0 not in older.leads
+
+
+def test_the_packaged_file_has_a_day_zero_fit_tighter_than_the_day_ahead_one():
+    loaded = load_calibration()
+    assert loaded.leads[0].n >= 1000
+    assert loaded.leads[0].sd_f < loaded.leads[24].sd_f < loaded.leads[48].sd_f
+    assert len(loaded.same_day_stations) == len(loaded.stations)
+    morning, evening = predict_high(loaded, "KMDW", 3, 55.0), predict_high(loaded, "KMDW", 24, 55.0)
+    assert morning.sd_f < 0.7 * evening.sd_f
+
+
 def test_outliers_are_dropped():
     pairs = _pairs("KAAA", [0.5] * 40) + _pairs("KAAA", [40.0])
     fit = fit_error_model(
