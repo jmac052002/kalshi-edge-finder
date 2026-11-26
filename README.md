@@ -57,7 +57,7 @@ Pre-event quotes are cached in the `pre_event_prices` table, one request per mar
 
 ### Sportsbook comparison
 
-`kalshi_edge.odds` captures every bookmaker's head-to-head (moneyline) price for one sport, and `kalshi_edge.compare` lines those up with the newest Kalshi snapshot. The design, with the reasoning behind each choice, is in [docs/design/sportsbook-comparison.md](docs/design/sportsbook-comparison.md). The short version:
+`kalshi_edge.odds` captures every bookmaker's head-to-head (moneyline) price for one sport, and `kalshi_edge.compare` lines those up with the newest Kalshi snapshot. NFL game winners (`KXNFLGAME`, Odds API key `americanfootball_nfl`) and NBA game winners (`KXNBAGAME`, `basketball_nba`) use the same fee math and the same matching rules; each sport has its own alias table under `config/teams/`. The design, with the reasoning behind each choice, is in [docs/design/sportsbook-comparison.md](docs/design/sportsbook-comparison.md). The short version:
 
 **Why a sportsbook is the reference.** Books like Pinnacle take sharp money all day and move their lines until they stop losing. Their price, with the margin removed, is the best public estimate of a game's probability. The tool treats it as the yardstick, not as the truth, and says so in every report. The calibration backtest is the only thing that will ever tell us whether Kalshi's own prices are biased.
 
@@ -69,7 +69,7 @@ Pre-event quotes are cached in the `pre_event_prices` table, one request per mar
 
 **What the columns mean.** `brkeven` is `(ask + fee per contract) / payout`, the win probability you need just to get your money back. `fair` is the de-vigged reference probability. `edge` is `fair − brkeven` in probability points, `ev/ct` is the same thing in dollars per contract, and `roi` is `ev / cost`. A negative number is the normal case: a Kalshi contract that looks a point cheaper than the book's raw price is usually still a little expensive once the vig is removed and the fee is added. The tool prints that without drama.
 
-**Matching games.** A Kalshi event ticker like `KXNFLGAME-26NOV08CINATL` carries the game date (US Eastern) and two team codes run together. The codes are not fixed width (`GB`, `KC`, `LA`, `LAC`, `LAR`...), so the parser tries every split against the checked-in alias table `config/teams/nfl.json` and uses the contract tickers (`...-CIN`, `...-ATL`) to settle anything ambiguous. A sportsbook game matches when it has the same two teams and its kickoff falls on that date in US Eastern time. Exactly one candidate is a match; zero or several are reported as unmatched, never guessed. `close_time` is never used: on an open market it can sit days after kickoff. Checked against 505 real events: all parse, and a Thursday night ticker (`26AUG06`) lines up with a 00:00Z Friday kickoff, which confirms the Eastern-date rule.
+**Matching games.** A Kalshi event ticker like `KXNFLGAME-26NOV08CINATL` or `KXNBAGAME-26NOV27ATLBOS` carries the game date (US Eastern) and two team codes run together. The codes are not fixed width (`GB`, `KC`, `LA`, `LAC`, `LAR` on the NFL side; NBA clubs currently use three-letter codes such as `LAL`, `LAC`, `GSW`, `NYK`), so the parser tries every split against the checked-in alias table (`config/teams/nfl.json` or `config/teams/nba.json`) and uses the contract tickers (`...-CIN`, `...-ATL`) to settle anything ambiguous. A sportsbook game matches when it has the same two teams and its kickoff falls on that date in US Eastern time. Exactly one candidate is a match; zero or several are reported as unmatched, never guessed. `close_time` is never used: on an open market it can sit days after kickoff. Checked against 505 real events: all parse, and a Thursday night ticker (`26AUG06`) lines up with a 00:00Z Friday kickoff, which confirms the Eastern-date rule.
 
 **Time gap and live games.** The report prints how far apart the Kalshi snapshot and the odds capture were and flags `STALE` past `--max-gap-minutes` (default 15). An "edge" between a line from noon and a price from 3 pm is just line movement. Games that have already kicked off are listed but not priced: in-play book lines and Kalshi's live market move at different speeds, so a gap between them is lag. `--include-live` prices them anyway, tagged `IN PLAY`.
 
@@ -183,9 +183,17 @@ python -m kalshi_edge.collect --series KXNFLGAME --mode snapshot  # free
 python -m kalshi_edge.compare --series KXNFLGAME
 ```
 
+NBA game winners use the same three commands with a different sport and team table. Because the NBA plays most nights, run this whenever you run the non-sports scan, not only on NFL Sundays:
+
+```bash
+python -m kalshi_edge.odds --sport basketball_nba                # 2 credits, one call
+python -m kalshi_edge.collect --series KXNBAGAME --mode snapshot  # free
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
+```
+
 The order matters only in that the two captures should be close together; `compare` prints the gap and flags it when it is wide. `compare` makes no network calls, so you can rerun it with `--devig multiplicative`, `--reference median` or `--contracts 10` as often as you like against the same captures. Snapshot runs also build the price history the roadmap's second calibration view will use.
 
-At two credits a run, the free tier covers one odds capture a day for the month with 400 credits to spare, or a few per game day.
+Each sport costs two credits per capture (`us,eu`). The free tier is 500 a month, which covers a daily NFL capture, a twice-weekly NBA capture, and plenty of slack. Do not call the same sport twice in one run.
 
 **Once a day, for anything that is not a game: the non-sports scan.**
 
@@ -232,7 +240,7 @@ python -m kalshi_edge.collect --series KXNFLGAME KXNFLANYTD --mode snapshot
 # Finalized markets and their results, including the historical archive.
 python -m kalshi_edge.collect --series KXNFLGAME --mode settled
 
-# Series list from a JSON file: {"series": ["KXNFLGAME", "KXNFLANYTD"]}
+# Series list from a JSON file: {"series": ["KXNFLGAME", "KXNFLANYTD", "KXNBAGAME"]}
 python -m kalshi_edge.collect --config config/series.example.json --mode snapshot
 
 # Calibration of the settled markets collected above. The first run fetches
@@ -246,11 +254,13 @@ python -m kalshi_edge.calibrate --series KXNFLGAME --lead-hours 12 --contracts 1
 Useful collector flags: `--db PATH`, `--min-interval SECONDS`, `--limit N` (page size, 1–1000), `--max-pages N`, `--base-url URL`. Calibration flags: `--buckets N`, `--contracts N`, `--all-contracts`, `--lookback-hours H`, `--event-hours H`, `--lead-hours H`, `--refresh`, `--max-fetch N`, `--json PATH`.
 
 ```bash
-# Sportsbook moneylines for the NFL from US books plus Pinnacle (2 credits). Needs ODDS_API_KEY.
+# Sportsbook moneylines from US books plus Pinnacle (2 credits per sport). Needs ODDS_API_KEY.
 python -m kalshi_edge.odds --sport americanfootball_nfl --regions us,eu
+python -m kalshi_edge.odds --sport basketball_nba --regions us,eu
 
 # Compare the newest Kalshi snapshot with the newest odds capture. No network.
 python -m kalshi_edge.compare --series KXNFLGAME
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
 
 # Same, with the other de-vig method, a median of the books, a fixed order size, and a JSON copy.
 python -m kalshi_edge.compare --series KXNFLGAME --devig multiplicative --reference median --contracts 10 --json compare.json

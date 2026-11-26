@@ -65,12 +65,34 @@ Reference = Literal["pinnacle", "median"]
 REFERENCES: tuple[Reference, ...] = ("pinnacle", "median")
 PINNACLE = "pinnacle"
 
-CAVEATS = (
+COMMON_CAVEATS = (
     "fair probabilities come from one reference (a sportsbook), not from the truth",
     "edge is per contract at the current ask; book depth at that price is unknown",
-    "NFL ties are ignored: a book pushes, Kalshi pays 0.5 (about 0.2% of games)",
     "a wide time gap between captures means the 'edge' may just be line movement",
 )
+
+# Inserted before the time-gap line so an NFL report still has four caveats
+# in the same order as before this sport was added.
+_SPORT_CAVEATS = {
+    "americanfootball_nfl": (
+        "NFL ties are ignored: a book pushes, Kalshi pays 0.5 (about 0.2% of games)"
+    ),
+    "basketball_nba": (
+        "NBA games do not end in a tie: they play overtime until there is a winner"
+    ),
+}
+
+
+def caveats_for(sport_key: str) -> tuple[str, ...]:
+    """Honesty lines for one compare report, including a sport-specific tie note."""
+    sport_note = _SPORT_CAVEATS.get(sport_key)
+    if sport_note is None:
+        return COMMON_CAVEATS
+    return (COMMON_CAVEATS[0], COMMON_CAVEATS[1], sport_note, COMMON_CAVEATS[2])
+
+
+# The original NFL list, kept under this name so existing tests and imports agree.
+CAVEATS = caveats_for("americanfootball_nfl")
 
 
 @dataclass(frozen=True)
@@ -510,7 +532,7 @@ def format_report(report: Report) -> str:
         f"profit per contract in dollars; roi = ev / cost."
     )
     lines.append("read this honestly:")
-    lines.extend(f"  - {caveat}" for caveat in CAVEATS)
+    lines.extend(f"  - {caveat}" for caveat in caveats_for(report.sport_key))
     return "\n".join(lines)
 
 
@@ -527,7 +549,7 @@ def report_to_json(report: Report) -> str:
     data = convert(asdict(report))
     assert isinstance(data, dict)
     data["stale"] = report.stale
-    data["caveats"] = list(CAVEATS)
+    data["caveats"] = list(caveats_for(report.sport_key))
     return json.dumps(data, indent=2, sort_keys=True)
 
 
@@ -544,6 +566,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "  python -m kalshi_edge.compare --series KXNFLGAME\n"
             "  python -m kalshi_edge.compare --series KXNFLGAME --devig multiplicative --reference median\n"
             "  python -m kalshi_edge.compare --series KXNFLGAME --contracts 10 --json out.json\n"
+            "  python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

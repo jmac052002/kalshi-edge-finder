@@ -84,3 +84,43 @@ def test_table_validation():
         TeamTable.from_mapping({"teams": {"A": ["AA"]}})
     with pytest.raises(ValueError, match="not found"):
         TeamTable.load(DEFAULT_TABLE_PATH.with_name("missing.json"))
+
+
+NBA_TABLE_PATH = DEFAULT_TABLE_PATH.with_name("nba.json")
+
+
+@pytest.fixture(scope="module")
+def nba_table():
+    return TeamTable.load(NBA_TABLE_PATH)
+
+
+def test_checked_in_nba_table_has_30_clubs_and_observed_codes(nba_table):
+    assert nba_table.sport_key == "basketball_nba"
+    # 30 NBA clubs plus the London Lions, who appeared once in settled KXNBAGAME markets.
+    assert len(nba_table.name_to_codes) == 31
+    codes = [code for codes in nba_table.name_to_codes.values() for code in codes]
+    assert len(codes) == len(set(codes))
+    assert all(code.isupper() and 2 <= len(code) <= 4 for code in codes)
+    assert nba_table.name("LAL") == "Los Angeles Lakers"
+    assert nba_table.name("LAC") == "Los Angeles Clippers"
+    assert nba_table.name("GSW") == "Golden State Warriors"
+    assert nba_table.name("NYK") == "New York Knicks"
+    assert nba_table.name("NOP") == "New Orleans Pelicans"
+    assert nba_table.name("LIO") == "London Lions"
+
+
+@pytest.mark.parametrize(
+    ("ticker", "expected_codes", "expected_date"),
+    [
+        ("KXNBAGAME-26NOV27ATLBOS", ("ATL", "BOS"), date(2026, 11, 27)),
+        ("KXNBAGAME-26NOV27NOPLAC", ("NOP", "LAC"), date(2026, 11, 27)),
+        ("KXNBAGAME-26NOV27LALSAS", ("LAL", "SAS"), date(2026, 11, 27)),
+        ("KXNBAGAME-26NOV25SACGSW", ("SAC", "GSW"), date(2026, 11, 25)),
+    ],
+)
+def test_nba_tickers_parse(nba_table, ticker, expected_codes, expected_date):
+    parsed = parse_event_ticker(ticker, nba_table)
+    assert parsed.codes == expected_codes
+    assert parsed.game_date == expected_date
+    assert parsed.series_ticker == "KXNBAGAME"
+    assert parsed.teams == {nba_table.name(expected_codes[0]), nba_table.name(expected_codes[1])}
