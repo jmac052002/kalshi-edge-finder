@@ -5,11 +5,13 @@
 ```bash
 python -m kalshi_edge.scan --json scan.json
 python -m kalshi_edge.compare --series KXNFLGAME --json compare.json
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
 python -m kalshi_edge.calibrate --series KXNFLGAME --json calibration.json
 
 python -m kalshi_edge.dashboard \
   --scan scan.json \
   --compare compare.json \
+  --compare compare-nba.json \
   --calibration calibration.json \
   --db data/kalshi.db \
   --out dashboard.html
@@ -75,10 +77,12 @@ set -euo pipefail
 
 python -m kalshi_edge.collect --config config/series.example.json --mode snapshot
 python -m kalshi_edge.scan --json scan.json
-python -m kalshi_edge.dashboard --scan scan.json --db data/kalshi.db --out dashboard.html
+python -m kalshi_edge.odds --sport basketball_nba
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
+python -m kalshi_edge.dashboard --scan scan.json --compare compare-nba.json --db data/kalshi.db --out dashboard.html
 ```
 
-Add `--compare` after an `odds` and `compare` run, and `--calibration` after the weekly `calibrate` run. Leaving last week's `calibration.json` in place is fine. Its chip turns to Stale after eight days.
+The non-sports list stays in `scan.json`. Sportsbook sides are added with `--compare`, which can be repeated: one file per series. Run the NBA capture on the same mornings as the scan, not only on NFL game days. Add a second `--compare compare.json` after an NFL `odds` and `compare` run, and `--calibration` after the weekly `calibrate` run. Leaving last week's `calibration.json` in place is fine. Its chip turns to Stale after eight days.
 
 ## What it does not do
 

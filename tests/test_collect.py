@@ -206,7 +206,7 @@ def test_config_file_and_cli_series_combine(tmp_path):
 
 def test_example_config_loads():
     path = Path("config/series.example.json")
-    assert resolve_series(None, path) == ["KXNFLGAME", "KXNFLANYTD"]
+    assert resolve_series(None, path) == ["KXNFLGAME", "KXNFLANYTD", "KXNBAGAME"]
 
 
 def test_main_snapshot_uses_db_path(tmp_path, monkeypatch, capsys):

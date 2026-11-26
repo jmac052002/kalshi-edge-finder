@@ -8,8 +8,9 @@ three-letter codes, and the Rams have appeared as both ``LA`` and ``LAR`` in
 the same season. So ``LACHI`` could be ``LA``+``CHI`` or ``LAC``+``HI``, and
 the only way to split it is to know which codes exist.
 
-That knowledge is the checked-in alias table ``config/teams/nfl.json``,
-keyed by the full names The Odds API prints. The parser tries every split
+That knowledge is a checked-in alias table under ``config/teams/``, keyed
+by the full names The Odds API prints. ``nfl.json`` covers ``KXNFLGAME``
+and ``nba.json`` covers ``KXNBAGAME``. The parser tries every split
 and keeps the ones where both halves are known codes. When the caller also
 passes the codes from the event's market tickers (``...-CIN``, ``...-ATL``),
 those settle any split that is still ambiguous. Anything that does not

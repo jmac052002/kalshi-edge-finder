@@ -172,7 +172,7 @@ for each open Kalshi event (grouped by event_ticker, series in scope):
     else: report ambiguous, do not pick
 ```
 
-The alias table is a checked-in JSON file, `config/teams/nfl.json`, mapping Kalshi codes to the full names The Odds API prints:
+The alias table is a checked-in JSON file per sport, `config/teams/nfl.json` for `KXNFLGAME` and `config/teams/nba.json` for `KXNBAGAME`, mapping Kalshi codes to the full names The Odds API prints:
 
 ```json
 {"CIN": "Cincinnati Bengals", "ATL": "Atlanta Falcons", "LAC": "Los Angeles Chargers"}
@@ -190,7 +190,7 @@ A better long-term source is a real game-start timestamp. Kalshi's market payloa
 
 Once an event is matched, each Kalshi market ticker's final segment gives the team the YES contract pays on. The sportsbook outcome for that team is the comparable. The other team's outcome is the comparable for the NO side.
 
-Ties: NFL moneylines at most books are two-way with a tie voiding the bet (push), while Kalshi settles a tie at 0.5. A push returns the stake; Kalshi returns half the notional. These differ by roughly the price of the contract times the tie probability (about 0.2% of NFL games). The design notes it and ignores it, with the assumption stated in the output.
+Ties: NFL moneylines at most books are two-way with a tie voiding the bet (push), while Kalshi settles a tie at 0.5. A push returns the stake; Kalshi returns half the notional. These differ by roughly the price of the contract times the tie probability (about 0.2% of NFL games). The design notes it and ignores it, with the assumption stated in the output. NBA games do not end in a tie: they play overtime until there is a winner, and the compare report says so instead of the NFL tie note.
 
 ## 6. The math
 

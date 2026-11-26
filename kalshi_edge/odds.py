@@ -109,6 +109,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "examples:\n"
             "  python -m kalshi_edge.odds --sport americanfootball_nfl\n"
             "  python -m kalshi_edge.odds --sport americanfootball_nfl --regions us\n"
+            "  python -m kalshi_edge.odds --sport basketball_nba\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

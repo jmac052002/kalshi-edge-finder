@@ -171,13 +171,14 @@ For each settled game, fetches the hourly candlestick history once, takes the la
 
 The first run makes one request per settled market and takes a few minutes. Later runs only fetch newly settled games. To look at the chart from WSL, `explorer.exe .` opens the current folder in Windows Explorer.
 
-### `odds` (2 credits, game day)
+### `odds` (2 credits per sport)
 
 ```bash
 python -m kalshi_edge.odds --sport americanfootball_nfl
+python -m kalshi_edge.odds --sport basketball_nba
 ```
 
-Calls The Odds API once for every bookmaker's moneyline on upcoming NFL games and stores every book's raw decimal odds in `sportsbook_odds`, plus one row in `odds_captures` recording the run. Nothing is de-vigged on the way in, so the method can change later without spending credits again.
+Calls The Odds API once for every bookmaker's moneyline on upcoming games for that sport and stores every book's raw decimal odds in `sportsbook_odds`, plus one row in `odds_captures` recording the run. Nothing is de-vigged on the way in, so the method can change later without spending credits again. One command is one sport and one credit spend; pass `basketball_nba` for NBA game winners. Run NBA on the same mornings as the non-sports scan, not only on NFL game days.
 
 One credit per region per market: the default `--regions us,eu` is 2 credits, and `eu` is what brings in Pinnacle. Before spending anything the run reads the remaining-credit counter from a free endpoint and refuses to run if fewer than `--min-remaining` (default 50) are left, so a bug can never drain the month. Every run prints `remaining=` and `used=`.
 
@@ -189,9 +190,10 @@ Flags: `--sport KEY`, `--regions us,eu`, `--min-remaining N`, `--db PATH`.
 
 ```bash
 python -m kalshi_edge.compare --series KXNFLGAME
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
 ```
 
-Takes the newest Kalshi snapshot and the newest odds capture, matches games by team codes and the US-Eastern game date in the ticker, removes each book's margin, uses Pinnacle (or a median of the books) as the fair probability, computes Kalshi's exact taker fee for a $10 order, and prints the edge per contract. No network calls, so rerun it with different flags as often as you like.
+Takes the newest Kalshi snapshot and the newest odds capture for that series' sport, matches games by team codes and the US-Eastern game date in the ticker, removes each book's margin, uses Pinnacle (or a median of the books) as the fair probability, computes Kalshi's exact taker fee for a $10 order, and prints the edge per contract. No network calls, so rerun it with different flags as often as you like. `--teams` also names the Odds API sport (`config/teams/nba.json` sets `basketball_nba`).
 
 | Flag | Default | What it changes |
 | --- | --- | --- |
@@ -210,7 +212,7 @@ Takes the newest Kalshi snapshot and the newest odds capture, matches games by t
 python -m kalshi_edge.scan
 ```
 
-One list for markets that are not NFL games. It needs no key. It calls the public Kalshi API, `api.weather.gov` (with a User-Agent), and the Cleveland Fed nowcast files. Weather contracts and the economic series are written into `data/kalshi.db` the same way `collect --mode snapshot` writes them, and each NWS hourly high the scan prices is written to `nws_forecasts` so a later `weather_calibrate` can fit the forecast the scan actually used. The short category list is printed and not stored.
+One list for markets that are not game-winner contracts (NFL or NBA). It needs no key. It calls the public Kalshi API, `api.weather.gov` (with a User-Agent), and the Cleveland Fed nowcast files. Weather contracts and the economic series are written into `data/kalshi.db` the same way `collect --mode snapshot` writes them, and each NWS hourly high the scan prices is written to `nws_forecasts` so a later `weather_calibrate` can fit the forecast the scan actually used. The short category list is printed and not stored.
 
 Read the first verdict before anything else. Either some sides have a model probability above the break-even of a $10 order at the ask, or the report says `nothing clears costs today`. Jobs, unemployment, initial claims, and the Fed decision are listed with price and settlement time only: there is no free consensus for them, and this command will not invent one. CPI is modeled only for the month the Cleveland Fed file is currently nowcasting.
 
@@ -239,7 +241,7 @@ python -m kalshi_edge.calibrate --series KXNFLGAME
 
 The settled run must not be skipped, for the archive reason above. The calibrate run is cheap once the cache is warm. Expect the sample to grow by about 30 games a week; each bucket needs a few hundred games before its "actual" column means much, so this is a months-long picture.
 
-**Game day (Sunday, Monday night, Thursday night).** Run the three captures within a few minutes of each other, in one shell, before the games you care about kick off:
+**NFL game day (Sunday, Monday night, Thursday night).** Run the three captures within a few minutes of each other, in one shell, before the games you care about kick off:
 
 ```bash
 cd ~/projects/kalshi-edge-finder
@@ -252,7 +254,15 @@ python -m kalshi_edge.collect --series KXNFLGAME --mode snapshot  # free
 python -m kalshi_edge.compare --series KXNFLGAME                  # free, offline
 ```
 
-One shell, because the exported key lives only where you ran `read`. At 2 credits a run, 500 credits is one capture a day for the month with 400 to spare. The free feed lists games only a few days ahead, so next week's Kalshi markets show as "unmatched" until the books post lines, usually midweek.
+**NBA, on any morning you already run the non-sports scan.** The NBA plays most nights, so this is not limited to NFL Sundays. One Odds API call per run:
+
+```bash
+python -m kalshi_edge.odds --sport basketball_nba                # 2 credits
+python -m kalshi_edge.collect --series KXNBAGAME --mode snapshot  # free
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
+```
+
+One shell, because the exported key lives only where you ran `read`. Each sport costs 2 credits a capture; 500 credits covers a daily NFL capture and a twice-weekly NBA capture with hundreds left. The free feed lists games only a few days ahead, so later Kalshi markets show as "unmatched" until the books post lines.
 
 **Any morning, for the non-sports list:**
 
@@ -374,11 +384,16 @@ git status && git pull origin main
 python -m kalshi_edge.collect --series KXNFLGAME --mode settled
 python -m kalshi_edge.calibrate --series KXNFLGAME
 
-# ---- game day, one shell, within minutes ----
+# ---- NFL game day, one shell, within minutes ----
 read -rs ODDS_API_KEY && export ODDS_API_KEY
 python -m kalshi_edge.odds --sport americanfootball_nfl          # 2 credits
 python -m kalshi_edge.collect --series KXNFLGAME --mode snapshot
 python -m kalshi_edge.compare --series KXNFLGAME
+
+# ---- NBA, on the same mornings as the non-sports scan (not Sunday-only) ----
+python -m kalshi_edge.odds --sport basketball_nba                # 2 credits, one call
+python -m kalshi_edge.collect --series KXNBAGAME --mode snapshot
+python -m kalshi_edge.compare --series KXNBAGAME --teams config/teams/nba.json --json compare-nba.json
 
 # ---- any morning, no key ----
 python -m kalshi_edge.scan

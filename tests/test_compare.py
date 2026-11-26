@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kalshi_edge.compare import format_report, main, report_to_json, run
+from kalshi_edge.compare import caveats_for, format_report, main, report_to_json, run
 from kalshi_edge.fees import UnknownFeeTypeError
 from kalshi_edge.parse import SeriesFee, parse_market, parse_snapshot
 from kalshi_edge.sportsbook.parse import SOURCE, OddsCapture, parse_odds_payload
@@ -216,3 +216,136 @@ def test_in_play_games_are_listed_not_priced_unless_asked(db_path, capsys):
     text = format_report(report)
     assert "in play, not priced (1;" in text
     assert "the odds feed covered kickoffs from 2026-11-08T18:00:00Z to 2026-11-17T01:15:00Z" in text
+
+
+
+def test_caveats_name_the_sport():
+    nfl = caveats_for("americanfootball_nfl")
+    nba = caveats_for("basketball_nba")
+    assert any("NFL ties" in line for line in nfl)
+    assert not any("NFL ties" in line for line in nba)
+    assert any("overtime" in line for line in nba)
+    assert nfl[0] == nba[0] and nfl[1] == nba[1]
+
+
+def _nba_contract(ticker, event, yes_ask, no_ask):
+    payload = {
+        "ticker": ticker,
+        "event_ticker": event,
+        "status": "active",
+        "result": "",
+        "yes_bid_dollars": str(Decimal(yes_ask) - Decimal("0.02")),
+        "yes_ask_dollars": yes_ask,
+        "no_bid_dollars": str(Decimal(no_ask) - Decimal("0.02")),
+        "no_ask_dollars": no_ask,
+        "notional_value_dollars": "1.0000",
+    }
+    market = parse_market(payload, series_ticker="KXNBAGAME", source="live", fetched_at="2026-11-26T14:00:00Z")
+    snapshot = parse_snapshot(payload, series_ticker="KXNBAGAME", captured_at="2026-11-26T14:00:00Z")
+    return market, snapshot
+
+
+def test_nba_compare_matches_and_skips_live_games(tmp_path, capsys):
+    """KXNBAGAME uses the same fee math and live-game skip as KXNFLGAME."""
+    path = tmp_path / "nba.db"
+    event = "KXNBAGAME-26NOV27ATLBOS"
+    rows = [
+        _nba_contract(f"{event}-BOS", event, "0.7500", "0.2600"),
+        _nba_contract(f"{event}-ATL", event, "0.2500", "0.7600"),
+        # Already underway at the report clock; must be listed, not priced.
+        _nba_contract("KXNBAGAME-26NOV26MIANYK-NYK", "KXNBAGAME-26NOV26MIANYK", "0.6100", "0.4000"),
+        _nba_contract("KXNBAGAME-26NOV26MIANYK-MIA", "KXNBAGAME-26NOV26MIANYK", "0.4000", "0.6100"),
+    ]
+    odds_payload = [
+        {
+            "id": "evt-atlbos",
+            "sport_key": "basketball_nba",
+            "sport_title": "NBA",
+            "commence_time": "2026-11-28T00:30:00Z",
+            "home_team": "Boston Celtics",
+            "away_team": "Atlanta Hawks",
+            "bookmakers": [
+                {
+                    "key": "pinnacle",
+                    "title": "Pinnacle",
+                    "last_update": "2026-11-26T14:00:00Z",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "outcomes": [
+                                {"name": "Boston Celtics", "price": 1.30},
+                                {"name": "Atlanta Hawks", "price": 3.60},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "id": "evt-mianyk",
+            "sport_key": "basketball_nba",
+            "sport_title": "NBA",
+            "commence_time": "2026-11-26T17:00:00Z",
+            "home_team": "New York Knicks",
+            "away_team": "Miami Heat",
+            "bookmakers": [
+                {
+                    "key": "pinnacle",
+                    "title": "Pinnacle",
+                    "last_update": "2026-11-26T16:50:00Z",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "outcomes": [
+                                {"name": "New York Knicks", "price": 1.65},
+                                {"name": "Miami Heat", "price": 2.30},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    ]
+    captured = "2026-11-26T14:01:00Z"
+    with MarketStore(path) as store:
+        store.save_page([m for m, _ in rows], [s for _, s in rows])
+        odds_rows = parse_odds_payload(odds_payload, captured_at=captured)
+        store.save_odds(OddsCapture(SOURCE, "basketball_nba", captured, "us,eu", 2, len(odds_rows)), odds_rows)
+        store.save_series_fee(SeriesFee("KXNBAGAME", "quadratic_with_maker_fees", "1", captured))
+        table = TeamTable.load(DEFAULT_TABLE_PATH.with_name("nba.json"))
+        report = run(
+            series_ticker="KXNBAGAME",
+            store=store,
+            table=table,
+            now="2026-11-26T18:00:00Z",
+            contracts=10,
+            budget=None,
+        )
+    assert report.sport_key == "basketball_nba"
+    assert [e.event_ticker for e in report.events] == ["KXNBAGAME-26NOV27ATLBOS"]
+    assert report.live_skipped == [("KXNBAGAME-26NOV26MIANYK", "2026-11-26T17:00:00Z")]
+    bos = _side(report, "KXNBAGAME-26NOV27ATLBOS-BOS", "YES")
+    # Break-even is ask plus taker fee / contracts; a positive edge means fair > break-even.
+    assert bos.evaluation.break_even == pytest.approx(
+        float(bos.evaluation.price + bos.evaluation.fee_per_contract)
+    )
+    assert (bos.evaluation.edge > 0) == (bos.evaluation.fair_probability > bos.evaluation.break_even)
+    out_json = tmp_path / "compare-nba.json"
+    code = main([
+        "--series", "KXNBAGAME",
+        "--teams", str(DEFAULT_TABLE_PATH.with_name("nba.json")),
+        "--db", str(path),
+        "--contracts", "10",
+        "--json", str(out_json),
+        "--include-live",
+    ])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "sport=basketball_nba" in out
+    assert "Atlanta Hawks at Boston Celtics" in out
+    assert "NFL ties" not in out
+    assert "overtime" in out
+    data = json.loads(out_json.read_text())
+    assert data["sport_key"] == "basketball_nba"
+    assert any("overtime" in line for line in data["caveats"])
+    assert not any("NFL ties" in line for line in data["caveats"])
